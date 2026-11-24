@@ -66,7 +66,9 @@ import {
   probePdf,
   renderWatermarkedPage,
   engineSelftest,
+  getPdfWorkerMetrics,
 } from "./services/pdf-engine.js";
+import { getScryptPoolStats } from "./security/crypto.js";
 import {
   putPrivateObject,
   readPrivateObjectSync,
@@ -1682,6 +1684,8 @@ async function handleAdminStats(req, res) {
     ok: true,
     ...stats,
     backend: adapter.kind,
+    pdfWorker: getPdfWorkerMetrics(),
+    scryptPool: getScryptPoolStats(),
     timestamp: nowIso(),
   });
 }
