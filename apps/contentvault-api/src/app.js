@@ -3,7 +3,7 @@
  *
  * Separating server construction (`createAppServer`) from CLI binding
  * (`server.js`) allows acceptance tests to start an isolated ephemeral server
- * in-process with zero mocks.
+ * in-process with zero mocks while enforcing production safety invariants.
  */
 
 import { createServer } from "node:http";
@@ -20,6 +20,8 @@ import {
   clientIp,
 } from "./http/helpers.js";
 import {
+  currentUser,
+  canViewPortfolio,
   handleAuth,
   handleDocuments,
   handleDocumentDetail,
@@ -38,7 +40,12 @@ import {
 import { audit } from "./security/audit.js";
 import { newId } from "./security/crypto.js";
 import { getDb, nowIso } from "./db.js";
-import { PUBLIC_DIR, PORTFOLIO_PUBLIC_DIR, ensureDirs } from "./config.js";
+import {
+  PUBLIC_DIR,
+  PORTFOLIO_PUBLIC_DIR,
+  assertProductionSafety,
+  ensureDirs,
+} from "./config.js";
 
 const STATIC_MIME = {
   ".html": "text/html; charset=utf-8",
@@ -49,7 +56,11 @@ const STATIC_MIME = {
   ".ico": "image/x-icon",
 };
 
-function serveStaticFromRoot(rootDir, relPath, res) {
+const NOINDEX_HEADER = {
+  "X-Robots-Tag": "noindex, nofollow, noarchive",
+};
+
+function serveStaticFromRoot(rootDir, relPath, res, extraHeaders = {}) {
   if (!fs.existsSync(rootDir)) return false;
   const targetRel = relPath || "index.html";
   if (
@@ -81,23 +92,65 @@ function serveStaticFromRoot(rootDir, relPath, res) {
   const buf = fs.readFileSync(resolvedFile);
   sendBuffer(res, 200, buf, mime, {
     ...htmlSecurityHeaders(),
-    "X-Robots-Tag": "noindex, nofollow, noarchive",
+    ...NOINDEX_HEADER,
     "Cache-Control": "no-cache",
+    ...extraHeaders,
   });
   return true;
 }
 
-function serveStatic(pathname, res) {
-  if (pathname === "/portfolio" || pathname.startsWith("/portfolio/")) {
-    const sub = pathname.replace(/^\/portfolio\/?/, "") || "index.html";
-    return serveStaticFromRoot(PORTFOLIO_PUBLIC_DIR, sub, res);
+/**
+ * SEC-001: Enforce authenticated administrator or reviewer authorisation on all
+ * private M007 portfolio assets and collaboration enquiry endpoints.
+ */
+function ensurePortfolioAccess(req, res, pathname) {
+  const user = currentUser(req);
+  const ua = String(req.headers["user-agent"] || "").slice(0, 300);
+  if (!user) {
+    audit({
+      event: "portfolio.access",
+      outcome: "deny",
+      ip: clientIp(req),
+      userAgent: ua,
+      detail: { reason: "unauthenticated", pathname },
+    });
+    sendError(
+      res,
+      401,
+      "not_authenticated",
+      "Authentication as an authorized reviewer or administrator is required to access the private M007 portfolio.",
+      {},
+      NOINDEX_HEADER,
+    );
+    return null;
   }
-  const targetRel = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
-  return serveStaticFromRoot(PUBLIC_DIR, targetRel, res);
+  if (!canViewPortfolio(user)) {
+    audit({
+      event: "portfolio.access",
+      outcome: "deny",
+      actorId: user.id,
+      actorRole: user.role,
+      ip: clientIp(req),
+      userAgent: ua,
+      detail: { reason: "insufficient_role", pathname },
+    });
+    sendError(
+      res,
+      403,
+      "portfolio_access_denied",
+      "Private M007 portfolio access is restricted to designated reviewers and administrators.",
+      {},
+      NOINDEX_HEADER,
+    );
+    return null;
+  }
+  return user;
 }
 
 export function createAppServer() {
   ensureDirs();
+  const database = getDb();
+  assertProductionSafety(database);
 
   return createServer(async (req, res) => {
     if (!req || !res) return;
@@ -130,7 +183,9 @@ export function createAppServer() {
       pathname.startsWith("/storage") ||
       pathname.startsWith("/var") ||
       pathname.startsWith("/private") ||
-      rawPathname.includes("..")
+      rawPathname.includes("..") ||
+      rawPathname.includes("\0") ||
+      rawPathname.includes("\\")
     ) {
       audit({
         event: "storage.direct_probe",
@@ -273,13 +328,27 @@ export function createAppServer() {
         return;
       }
 
-      // Local-only M007 Portfolio Collaboration Enquiry endpoint (no external send)
+      // SEC-001: Protected M007 Portfolio Collaboration Enquiry endpoint (Admin / Reviewer only)
       if (pathname === "/api/portfolio/enquiries") {
-        if (req.method !== "POST") {
-          res.setHeader("Allow", "POST");
-          sendError(res, 405, "method_not_allowed", "Allowed methods: POST.");
+        if (req.method !== "GET" && req.method !== "POST") {
+          res.setHeader("Allow", "GET, POST");
+          sendError(res, 405, "method_not_allowed", "Allowed methods: GET, POST.");
           return;
         }
+        const viewer = ensurePortfolioAccess(req, res, pathname);
+        if (!viewer) return;
+
+        if (req.method === "GET") {
+          const rows = getDb()
+            .prepare(
+              `SELECT id, created_at, actor_id, sender_name, sender_org, sender_email, topic, message
+               FROM portfolio_enquiries ORDER BY created_at DESC LIMIT 100`,
+            )
+            .all();
+          sendJson(res, 200, { ok: true, enquiries: rows }, NOINDEX_HEADER);
+          return;
+        }
+
         const limiter = rateLimit(`enquiry:${clientIp(req)}`, 10, 60);
         if (!limiter.allowed) {
           sendError(res, 429, "rate_limited", "Too many enquiry submissions.");
@@ -310,32 +379,69 @@ export function createAppServer() {
         getDb()
           .prepare(
             `INSERT INTO portfolio_enquiries
-              (id, created_at, sender_name, sender_org, sender_email, topic, message)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+              (id, created_at, actor_id, sender_name, sender_org, sender_email, topic, message)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           )
-          .run(id, nowIso(), senderName, senderOrg, senderEmail, topic, message);
+          .run(id, nowIso(), viewer.id, senderName, senderOrg, senderEmail, topic, message);
         audit({
           event: "portfolio.enquiry",
-          outcome: "info",
+          outcome: "allow",
+          actorId: viewer.id,
+          actorRole: viewer.role,
           ip: clientIp(req),
           detail: { enquiryId: id, topic },
         });
-        sendJson(res, 201, {
-          ok: true,
-          enquiryId: id,
-          mode: "local_staging_only",
-          notice:
-            "Recorded locally in private prototype database only. No external email or communication was transmitted.",
-        });
+        sendJson(
+          res,
+          201,
+          {
+            ok: true,
+            enquiryId: id,
+            mode: "local_staging_only",
+            notice:
+              "Recorded locally in private prototype database only. No external email or communication was transmitted.",
+          },
+          NOINDEX_HEADER,
+        );
         return;
       }
 
-      // Static frontend (GET / HEAD only, non-API paths)
+      // SEC-001: Private M007 Portfolio static routes (Admin / Reviewer only)
+      if (pathname === "/portfolio" || pathname.startsWith("/portfolio/")) {
+        if (req.method !== "GET" && req.method !== "HEAD") {
+          res.setHeader("Allow", "GET, HEAD");
+          sendError(res, 405, "method_not_allowed", "Allowed methods: GET, HEAD.");
+          return;
+        }
+        const viewer = ensurePortfolioAccess(req, res, pathname);
+        if (!viewer) return;
+
+        const sub = pathname.replace(/^\/portfolio\/?/, "") || "index.html";
+        if (sub === "index.html") {
+          audit({
+            event: "portfolio.access",
+            outcome: "allow",
+            actorId: viewer.id,
+            actorRole: viewer.role,
+            ip: clientIp(req),
+            detail: { pathname },
+          });
+        }
+        const served = serveStaticFromRoot(PORTFOLIO_PUBLIC_DIR, sub, res, {
+          "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0, private",
+        });
+        if (served) return;
+        sendError(res, 404, "not_found", "Portfolio asset not found.", {}, NOINDEX_HEADER);
+        return;
+      }
+
+      // Static ContentVault SPA frontend (GET / HEAD only, non-API paths)
       if (
         !pathname.startsWith("/api/") &&
         (req.method === "GET" || req.method === "HEAD")
       ) {
-        if (serveStatic(pathname, res)) {
+        const targetRel = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
+        if (serveStaticFromRoot(PUBLIC_DIR, targetRel, res)) {
           return;
         }
       }

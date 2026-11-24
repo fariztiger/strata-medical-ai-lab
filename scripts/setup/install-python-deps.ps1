@@ -3,16 +3,17 @@ $ErrorActionPreference = "Stop"
 
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 $VenvDir = Join-Path $RepoRoot ".venv"
+$ReqFile = Join-Path $RepoRoot "packages\watermark-engine\requirements.txt"
 
 Write-Host "[STRATA] Creating virtual environment at $VenvDir..."
 python -m venv $VenvDir
 
-$PipExe = Join-Path $VenvDir "Scripts\pip.exe"
-$PythonExe = Join-Path $VenvDir "Scripts\python.exe"
+$PipBin = Join-Path $VenvDir "Scripts\pip.exe"
+$PyBin = Join-Path $VenvDir "Scripts\python.exe"
 
-Write-Host "[STRATA] Installing PyMuPDF and Pillow..."
-& $PipExe install --no-deps pymupdf Pillow
+Write-Host "[STRATA] Installing pinned PyMuPDF and Pillow from $ReqFile..."
+& $PipBin install --no-deps -r $ReqFile
 
 Write-Host "[STRATA] Verifying watermark engine..."
-& $PythonExe (Join-Path $RepoRoot "scripts\synthetic\verify_watermark_visual.py")
+& $PyBin (Join-Path $RepoRoot "scripts\synthetic\verify_watermark_visual.py")
 Write-Host "[STRATA] Python dependency setup complete."

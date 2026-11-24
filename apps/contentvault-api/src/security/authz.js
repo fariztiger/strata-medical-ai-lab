@@ -19,15 +19,21 @@ import {
 } from "./crypto.js";
 import {
   SESSION_IDLE_MINUTES,
+  SESSION_MAX_HOURS,
   PAGE_TOKEN_TTL_SECONDS,
   AUDIO_TOKEN_TTL_SECONDS,
 } from "../config.js";
 import { audit } from "./audit.js";
 
 export const SESSION_COOKIE = "cv_session";
+export const VALID_ROLES = ["admin", "reviewer", "student"];
 
 function idleMs() {
   return SESSION_IDLE_MINUTES * 60 * 1000;
+}
+
+function absoluteMaxMs() {
+  return SESSION_MAX_HOURS * 60 * 60 * 1000;
 }
 
 /* ------------------------------------------------------------------ */
@@ -40,8 +46,9 @@ export function createUser({
   displayName,
   role,
   locale = "en",
+  isDemo = false,
 }) {
-  if (!["admin", "student"].includes(role)) {
+  if (!VALID_ROLES.includes(role)) {
     throw new Error(`Invalid role: ${role}`);
   }
   const normalizedEmail = String(email).trim().toLowerCase();
@@ -51,8 +58,8 @@ export function createUser({
   const id = newId("usr");
   getDb()
     .prepare(
-      `INSERT INTO users (id, email, display_name, role, password_hash, locale, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO users (id, email, display_name, role, password_hash, locale, is_demo, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -61,6 +68,7 @@ export function createUser({
       role,
       hashPassword(password),
       locale,
+      isDemo ? 1 : 0,
       nowIso(),
     );
   return findUserById(id);
@@ -70,7 +78,7 @@ export function findUserById(id) {
   if (!id) return null;
   const row = getDb()
     .prepare(
-      `SELECT id, email, display_name, role, locale, created_at, disabled_at
+      `SELECT id, email, display_name, role, locale, is_demo, created_at, disabled_at
        FROM users WHERE id = ?`,
     )
     .get(id);
@@ -82,7 +90,7 @@ export function findUserByEmail(email) {
   return (
     getDb()
       .prepare(
-        `SELECT id, email, display_name, role, locale, created_at, disabled_at
+        `SELECT id, email, display_name, role, locale, is_demo, created_at, disabled_at
          FROM users WHERE email = ? COLLATE NOCASE`,
       )
       .get(String(email).trim().toLowerCase()) ?? null
@@ -92,7 +100,7 @@ export function findUserByEmail(email) {
 export function listUsers() {
   return getDb()
     .prepare(
-      `SELECT id, email, display_name, role, locale, created_at, disabled_at
+      `SELECT id, email, display_name, role, locale, is_demo, created_at, disabled_at
        FROM users ORDER BY role, display_name`,
     )
     .all();
@@ -102,38 +110,7 @@ export function listUsers() {
 /* Sessions                                                            */
 /* ------------------------------------------------------------------ */
 
-/**
- * Verify credentials and open a session.
- * Returns { sessionId, user } on success, null on failure.
- * The same generic failure is returned for unknown user and wrong password so
- * the endpoint cannot be used to enumerate accounts.
- */
-export function login({ email, password, ip, userAgent }) {
-  const user = findUserByEmail(email);
-  const stored = user
-    ? getDb().prepare("SELECT password_hash FROM users WHERE id = ?").get(user.id)
-        ?.password_hash
-    : null;
-
-  // Always run a scrypt verification to keep timing comparable for unknown users.
-  const ok = stored
-    ? verifyPassword(password, stored)
-    : (verifyPassword(String(password ?? ""), hashPassword("dummy-password-value")),
-      false);
-
-  if (!user || !ok || user.disabled_at) {
-    audit({
-      event: "auth.login",
-      outcome: "deny",
-      actorId: user?.id ?? null,
-      actorRole: user?.role ?? null,
-      ip,
-      userAgent,
-      detail: { reason: user ? (user.disabled_at ? "disabled" : "bad_password") : "unknown_user" },
-    });
-    return null;
-  }
-
+export function createSessionForUser(user, { ip, userAgent, eventDetail = null } = {}) {
   const sessionId = randomToken(32);
   const now = new Date();
   const expiresAt = new Date(now.getTime() + idleMs()).toISOString();
@@ -159,14 +136,50 @@ export function login({ email, password, ip, userAgent }) {
     actorRole: user.role,
     ip,
     userAgent,
+    detail: eventDetail,
   });
 
   return { sessionId, user };
 }
 
 /**
+ * Verify credentials and open a session.
+ * Returns { sessionId, user } on success, null on failure.
+ */
+export function login({ email, password, ip, userAgent }) {
+  const user = findUserByEmail(email);
+  const stored = user
+    ? getDb().prepare("SELECT password_hash FROM users WHERE id = ?").get(user.id)
+        ?.password_hash
+    : null;
+
+  // Always run a scrypt verification to keep timing comparable for unknown users.
+  const ok = stored
+    ? verifyPassword(password, stored)
+    : (verifyPassword(String(password ?? ""), hashPassword("dummy-password-value")),
+      false);
+
+  if (!user || !ok || user.disabled_at) {
+    audit({
+      event: "auth.login",
+      outcome: "deny",
+      actorId: user?.id ?? null,
+      actorRole: user?.role ?? null,
+      ip,
+      userAgent,
+      detail: {
+        reason: user ? (user.disabled_at ? "disabled" : "bad_password") : "unknown_user",
+      },
+    });
+    return null;
+  }
+
+  return createSessionForUser(user, { ip, userAgent });
+}
+
+/**
  * Resolve a session id to a live user, or null.
- * Expired sessions are deleted on sight.
+ * Enforces BOTH rolling idle timeout AND absolute max session lifetime.
  */
 export function resolveSession(sessionId) {
   if (!sessionId || typeof sessionId !== "string") return null;
@@ -177,7 +190,13 @@ export function resolveSession(sessionId) {
   if (!session) return null;
 
   const now = Date.now();
-  if (new Date(session.expires_at).getTime() <= now) {
+  const createdMs = new Date(session.created_at).getTime();
+  const idleExpiresMs = new Date(session.expires_at).getTime();
+
+  if (
+    idleExpiresMs <= now ||
+    (Number.isFinite(createdMs) && now - createdMs >= absoluteMaxMs())
+  ) {
     db.prepare("DELETE FROM sessions WHERE id = ?").run(sessionId);
     return null;
   }
@@ -188,13 +207,15 @@ export function resolveSession(sessionId) {
     return null;
   }
 
-  // Rolling idle expiry, refreshed at most once a minute to limit writes.
+  // Rolling idle expiry (capped by absolute session lifetime), refreshed at most once a minute.
   if (now - new Date(session.last_seen_at).getTime() > 60_000) {
+    const absCapMs = Number.isFinite(createdMs) ? createdMs + absoluteMaxMs() : now + idleMs();
+    const nextExpiry = Math.min(now + idleMs(), absCapMs);
     db.prepare(
       "UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE id = ?",
     ).run(
       new Date(now).toISOString(),
-      new Date(now + idleMs()).toISOString(),
+      new Date(nextExpiry).toISOString(),
       sessionId,
     );
   }
@@ -219,8 +240,17 @@ export function logout(sessionId, meta = {}) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Entitlements - the single source of truth for read access           */
+/* Portfolio & Document Authorisation                                  */
 /* ------------------------------------------------------------------ */
+
+/**
+ * SEC-001: Private M007 portfolio requires an authenticated administrator or
+ * explicitly designated reviewer account. Anonymous and student access are denied.
+ */
+export function canViewPortfolio(user) {
+  if (!user || user.disabled_at) return false;
+  return user.role === "admin" || user.role === "reviewer";
+}
 
 export function getEntitlement(userId, documentId) {
   if (!userId || !documentId) return null;
@@ -231,10 +261,6 @@ export function getEntitlement(userId, documentId) {
   );
 }
 
-/**
- * Evaluate an entitlement row at this instant.
- * An entitlement is usable only when status is active AND it has not expired.
- */
 export function evaluateEntitlement(entitlement) {
   if (!entitlement) return { allowed: false, reason: "no_entitlement" };
   if (entitlement.status === "revoked") {
@@ -252,13 +278,6 @@ export function evaluateEntitlement(entitlement) {
   return { allowed: true, reason: "active" };
 }
 
-/**
- * The one function every read path must call.
- *
- * Returns { allowed, reason, entitlement }. Admins are allowed only when they
- * explicitly hold an entitlement too - admin role does not imply read access to
- * a student's protected material, keeping admin powers narrow and auditable.
- */
 export function canReadDocument(user, documentId) {
   if (!user) return { allowed: false, reason: "unauthenticated" };
   const entitlement = getEntitlement(user.id, documentId);
@@ -266,17 +285,9 @@ export function canReadDocument(user, documentId) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Short-lived page tokens                                             */
+/* SEC-005: Single-use Page Tokens & Bounded-Window Audio Stream Tokens*/
 /* ------------------------------------------------------------------ */
 
-/**
- * Issue a page token. It is bound to:
- *  - the user id (server-decided)
- *  - the document id
- *  - the page number
- *  - the entitlement version (so any grant/revoke invalidates it)
- *  - a short expiry
- */
 export function issuePageToken(user, documentId, page, entitlementVersion) {
   return signToken(
     {
@@ -295,15 +306,43 @@ export function verifyPageToken(token) {
 }
 
 /**
- * Issue a short-lived signed audio token bound to user, document, page/chapter,
- * and entitlement version.
+ * Verify AND atomically redeem a single-use page token (`jti`).
+ * Any subsequent replay of the same `X-Page-Token` raises TokenError("token_replayed").
  */
-export function issueAudioToken(user, documentId, page, entitlementVersion) {
+export function redeemPageToken(token) {
+  const claims = verifyToken(token, "page");
+  if (!claims.jti) {
+    throw new TokenError("malformed", "Page token is missing jti.");
+  }
+  const db = getDb();
+  const nowSec = Math.floor(Date.now() / 1000);
+  db.prepare("DELETE FROM token_redemptions WHERE expires_at < ?").run(nowSec);
+
+  const inserted = db
+    .prepare(
+      `INSERT OR IGNORE INTO token_redemptions (jti, redeemed_at, expires_at)
+       VALUES (?, ?, ?)`,
+    )
+    .run(claims.jti, nowSec, Number(claims.exp));
+
+  if (Number(inserted.changes) !== 1) {
+    throw new TokenError("token_replayed", "Page token has already been redeemed.");
+  }
+  return claims;
+}
+
+/**
+ * Issue a bounded-window (`60s` TTL) signed audio stream token bound to user,
+ * document, chapter/page, and entitlement version. Multi-request HTTP 206 Range
+ * playback is permitted within the active window until expiry or revocation.
+ */
+export function issueAudioToken(user, documentId, page, entitlementVersion, chapterId = null) {
   return signToken(
     {
       sub: user.id,
       doc: documentId,
       page: Number(page),
+      ...(chapterId ? { ch: String(chapterId) } : {}),
       ent: Number(entitlementVersion),
     },
     AUDIO_TOKEN_TTL_SECONDS,
@@ -316,5 +355,3 @@ export function verifyAudioToken(token) {
 }
 
 export { TokenError };
-
-

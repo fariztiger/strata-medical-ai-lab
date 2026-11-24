@@ -1,9 +1,11 @@
 /**
  * Minimal HTTP helpers: body parsing with limits, JSON responses, cookies,
- * and the security headers applied to every response.
+ * trusted-proxy boundary enforcement (SEC-003), and security headers.
  */
 
 import crypto from "node:crypto";
+import net from "node:net";
+import { getTrustedProxies, isFrameEmbedAllowed } from "../config.js";
 
 export const MAX_JSON_BYTES = 1024 * 256;
 
@@ -25,7 +27,7 @@ export function readBody(req, limit = MAX_JSON_BYTES) {
   });
 }
 
-/** Read a raw binary body (used for PDF upload) with an explicit cap. */
+/** Read a raw binary body (used for PDF/audio upload) with an explicit cap. */
 export function readRawBody(req, limit) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -79,11 +81,10 @@ const BASE_CSP = [
 
 /**
  * Headers for HTML/JS/CSS responses.
- * Inline styles are allowed because the reader uses a few computed style
- * attributes; inline scripts are not.
+ * SEC-002: Frame embedding is strictly disabled in production via isFrameEmbedAllowed().
  */
 export function htmlSecurityHeaders() {
-  const allowEmbed = process.env.CV_ALLOW_FRAME_EMBED === "1";
+  const allowEmbed = isFrameEmbedAllowed();
   const frameAncestors = allowEmbed ? "frame-ancestors *" : "frame-ancestors 'none'";
   const headers = {
     "Content-Security-Policy": [
@@ -110,10 +111,6 @@ export function htmlSecurityHeaders() {
 
 /**
  * Headers for protected images and audio.
- *
- * - `no-store` so a rendered page is never written to a shared cache.
- * - `no-cache, private` is the fallback for browsers that ignore no-store.
- * - `X-Robots-Tag` keeps pages out of search indexes if a URL leaks.
  */
 export function protectedAssetHeaders(extra = {}) {
   return {
@@ -143,8 +140,8 @@ export function sendJson(res, status, payload, headers = {}) {
   res.end(body);
 }
 
-export function sendError(res, status, code, message, extra = {}) {
-  sendJson(res, status, { ok: false, error: code, message, ...extra });
+export function sendError(res, status, code, message, extra = {}, headers = {}) {
+  sendJson(res, status, { ok: false, error: code, message, ...extra }, headers);
 }
 
 export function sendBuffer(res, status, buffer, contentType, extraHeaders = {}) {
@@ -205,60 +202,148 @@ export function clearCookie(name) {
   return serializeCookie(name, "", { maxAge: 0 });
 }
 
-export function isSecureRequest(req) {
-  return (
-    Boolean(req.socket?.encrypted) ||
-    String(req.headers["x-forwarded-proto"] || "").toLowerCase() === "https"
-  );
+/* ------------------------------------------------------------------ */
+/* SEC-003: Trusted Proxy Validation & Rate Limiting                   */
+/* ------------------------------------------------------------------ */
+
+export function normalizeIp(raw) {
+  const trimmed = String(raw || "").trim();
+  if (!trimmed) return "";
+  if (trimmed.startsWith("::ffff:")) {
+    const v4 = trimmed.slice(7);
+    if (net.isIPv4(v4)) return v4;
+  }
+  if (trimmed === "::1") return "127.0.0.1";
+  return net.isIP(trimmed) ? trimmed : "";
 }
 
-/* ------------------------------------------------------------------ */
-/* Rate limiting (in-memory, fixed window)                             */
-/* ------------------------------------------------------------------ */
+function ipv4ToInt(ip) {
+  return ip
+    .split(".")
+    .reduce((acc, oct) => ((acc << 8) + Number.parseInt(oct, 10)) >>> 0, 0);
+}
+
+function matchesTrustedSpec(ip, spec) {
+  const cleanIp = normalizeIp(ip);
+  if (!cleanIp) return false;
+  if (spec === "loopback") {
+    return cleanIp === "127.0.0.1";
+  }
+  if (spec.includes("/")) {
+    const [base, prefixRaw] = spec.split("/");
+    const cleanBase = normalizeIp(base);
+    const prefix = Number.parseInt(prefixRaw, 10);
+    if (net.isIPv4(cleanIp) && net.isIPv4(cleanBase) && prefix >= 0 && prefix <= 32) {
+      const mask = prefix === 0 ? 0 : (~0 << (32 - prefix)) >>> 0;
+      return (ipv4ToInt(cleanIp) & mask) === (ipv4ToInt(cleanBase) & mask);
+    }
+    return false;
+  }
+  return cleanIp === normalizeIp(spec);
+}
+
+export function isTrustedProxyIp(ip) {
+  const trusted = getTrustedProxies();
+  if (trusted.length === 0) return false;
+  return trusted.some((spec) => matchesTrustedSpec(ip, spec));
+}
+
+export function isFromTrustedProxy(req) {
+  const peerIp = normalizeIp(req.socket?.remoteAddress);
+  return Boolean(peerIp) && isTrustedProxyIp(peerIp);
+}
+
+/**
+ * Resolve the true client IP address (SEC-003):
+ * - By default (CV_TRUST_PROXY unset), X-Forwarded-For is completely ignored
+ *   and the TCP peer address is returned.
+ * - When the TCP peer is in CV_TRUST_PROXY, X-Forwarded-For hops are walked
+ *   from right to left, stopping at the first non-trusted valid IP so an
+ *   external client cannot spoof a left-most X-Forwarded-For value.
+ */
+export function clientIp(req) {
+  const peerIp = normalizeIp(req.socket?.remoteAddress) || "unknown";
+  if (!isTrustedProxyIp(peerIp)) {
+    return peerIp.slice(0, 64);
+  }
+
+  const forwarded = req.headers["x-forwarded-for"];
+  if (typeof forwarded !== "string" || !forwarded.trim()) {
+    return peerIp.slice(0, 64);
+  }
+
+  const hops = forwarded
+    .split(",")
+    .map((h) => normalizeIp(h))
+    .filter(Boolean);
+
+  for (let i = hops.length - 1; i >= 0; i -= 1) {
+    if (!isTrustedProxyIp(hops[i])) {
+      return hops[i].slice(0, 64);
+    }
+  }
+  return (hops[0] || peerIp).slice(0, 64);
+}
+
+export function isSecureRequest(req) {
+  if (req.socket?.encrypted) return true;
+  if (isFromTrustedProxy(req)) {
+    return String(req.headers["x-forwarded-proto"] || "").toLowerCase() === "https";
+  }
+  return false;
+}
 
 const buckets = new Map();
 
 /**
- * Simple in-memory limiter for login and page requests.
- * Deliberately simple for the prototype; a distributed limiter is required for
- * any multi-instance deployment (documented in known limitations).
+ * Fixed-window rate limiter supporting read-only inspection (`increment = false`)
+ * and explicit key clearing (used for per-account failed-login throttling).
  */
-export function rateLimit(key, limit, windowSeconds) {
+export function rateLimit(key, limit, windowSeconds, options = {}) {
+  const increment = options.increment !== false;
   const now = Date.now();
   const windowMs = windowSeconds * 1000;
   const bucket = buckets.get(key);
 
   if (!bucket || now - bucket.start >= windowMs) {
+    if (!increment) {
+      return { allowed: true, count: 0, remaining: limit };
+    }
     buckets.set(key, { start: now, count: 1 });
-    return { allowed: true, remaining: limit - 1 };
+    return { allowed: true, count: 1, remaining: Math.max(0, limit - 1) };
   }
-  bucket.count += 1;
-  if (bucket.count > limit) {
-    const retryAfter = Math.ceil((windowMs - (now - bucket.start)) / 1000);
-    return { allowed: false, remaining: 0, retryAfter };
+
+  const nextCount = increment ? bucket.count + 1 : bucket.count;
+  if (increment) {
+    bucket.count = nextCount;
   }
-  return { allowed: true, remaining: limit - bucket.count };
+
+  if (nextCount > limit || (!increment && nextCount >= limit)) {
+    const retryAfter = Math.max(1, Math.ceil((windowMs - (now - bucket.start)) / 1000));
+    return { allowed: false, count: nextCount, remaining: 0, retryAfter };
+  }
+  return { allowed: true, count: nextCount, remaining: Math.max(0, limit - nextCount) };
 }
 
-export function clientIp(req) {
-  const forwarded = req.headers["x-forwarded-for"];
-  if (typeof forwarded === "string" && forwarded.length > 0) {
-    return forwarded.split(",")[0].trim().slice(0, 64);
-  }
-  return String(req.socket?.remoteAddress || "unknown").slice(0, 64);
+export function clearRateLimit(key) {
+  buckets.delete(key);
 }
 
-/** CSRF-style protection: mutating requests must be same-origin JSON. */
+/** CSRF-style protection: mutating requests must match Host (honoring X-Forwarded-Host ONLY from trusted proxies). */
 export function isSameOriginMutating(req) {
   const origin = req.headers.origin;
-  if (!origin) return true; // non-browser clients (tests) authenticate via cookie anyway
+  if (!origin) return true;
   try {
     const parsed = new URL(origin);
-    const forwardedHost = String(req.headers["x-forwarded-host"] || "")
-      .split(",")[0]
-      .trim();
     const directHost = String(req.headers.host || "").trim();
-    return parsed.host === directHost || (Boolean(forwardedHost) && parsed.host === forwardedHost);
+    if (parsed.host === directHost) return true;
+    if (isFromTrustedProxy(req)) {
+      const forwardedHost = String(req.headers["x-forwarded-host"] || "")
+        .split(",")[0]
+        .trim();
+      if (forwardedHost && parsed.host === forwardedHost) return true;
+    }
+    return false;
   } catch {
     return false;
   }

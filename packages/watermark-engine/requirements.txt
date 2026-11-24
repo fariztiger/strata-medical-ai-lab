@@ -1,0 +1,4 @@
+# Pinned minimal Python runtime dependencies for STRATA ContentVault watermark engine
+# Install reproducibly via ./scripts/setup/install-python-deps.sh (POSIX) or .ps1 (Windows)
+pymupdf==2.1
+Pillow==13.0.0

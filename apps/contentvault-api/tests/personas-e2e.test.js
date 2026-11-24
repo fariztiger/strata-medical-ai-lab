@@ -239,8 +239,15 @@ describe("Four-Persona End-to-End Flow & M007 Portfolio Verification", () => {
     assert.equal(restoredPage.status, 200);
   });
 
-  it("M007 Portfolio Prototype serves private placeholder-marked profile and local-only enquiry capture", async () => {
-    const htmlRes = await req("/portfolio");
+  it("M007 Portfolio Prototype enforces reviewer/admin auth while preserving noindex and local-only enquiry capture", async () => {
+    const anonRes = await req("/portfolio");
+    assert.equal(anonRes.status, 401);
+    assert.ok((anonRes.headers.get("x-robots-tag") || "").includes("noindex"));
+
+    const studentDenied = await req("/portfolio", { cookie: sessions.studentA });
+    assert.equal(studentDenied.status, 403);
+
+    const htmlRes = await req("/portfolio", { cookie: sessions.admin });
     assert.equal(htmlRes.status, 200);
     assert.ok((htmlRes.headers.get("x-robots-tag") || "").includes("noindex"));
     const html = await htmlRes.text();
@@ -248,7 +255,7 @@ describe("Four-Persona End-to-End Flow & M007 Portfolio Verification", () => {
     assert.ok(html.includes("NSR #126713"));
     assert.ok(html.includes("PORTRAIT PLACEHOLDER"));
 
-    const jsRes = await req("/portfolio/portfolio.js");
+    const jsRes = await req("/portfolio/portfolio.js", { cookie: sessions.admin });
     assert.equal(jsRes.status, 200);
     const jsText = await jsRes.text();
     assert.ok(jsText.includes("978-983-44306-1-0"));
@@ -257,6 +264,7 @@ describe("Four-Persona End-to-End Flow & M007 Portfolio Verification", () => {
 
     const enqRes = await req("/api/portfolio/enquiries", {
       method: "POST",
+      cookie: sessions.admin,
       body: {
         senderName: "Prof. Synthetic Reviewer",
         senderOrg: "Academic Neurology Symposium",

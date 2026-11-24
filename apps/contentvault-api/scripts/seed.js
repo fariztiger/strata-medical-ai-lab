@@ -16,9 +16,10 @@ import { pathToFileURL } from "node:url";
 import {
   REPO_ROOT,
   SEED_MANIFEST_PATH,
+  isProduction,
   ensureDirs,
 } from "../src/config.js";
-import { closeDb } from "../src/db.js";
+import { closeDb, getDb } from "../src/db.js";
 import {
   createUser,
   findUserByEmail,
@@ -116,17 +117,28 @@ function resolveDemoPasswords() {
 
 function ensureAccount(spec, password) {
   const existing = findUserByEmail(spec.email);
-  if (existing) return existing;
+  if (existing) {
+    if (Number(existing.is_demo) !== 1) {
+      getDb().prepare("UPDATE users SET is_demo = 1 WHERE id = ?").run(existing.id);
+    }
+    return findUserByEmail(spec.email);
+  }
   return createUser({
     email: spec.email,
     password,
     displayName: spec.displayName,
     role: spec.role,
     locale: spec.locale,
+    isDemo: true,
   });
 }
 
 export async function seedDemoEnvironment() {
+  if (isProduction()) {
+    throw new Error(
+      "SEC-002 violation: Demo seeding is prohibited when NODE_ENV=production.",
+    );
+  }
   ensureDirs();
   const { adminPassword, studentPassword } = resolveDemoPasswords();
 

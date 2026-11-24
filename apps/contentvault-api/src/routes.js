@@ -22,21 +22,25 @@ import {
   clearCookie,
   isSecureRequest,
   rateLimit,
+  clearRateLimit,
   clientIp,
   protectedAssetHeaders,
 } from "./http/helpers.js";
 import {
   SESSION_COOKIE,
+  VALID_ROLES,
   createUser,
   findUserById,
   findUserByEmail,
   listUsers,
   login,
+  createSessionForUser,
   logout,
   resolveSession,
+  canViewPortfolio,
   canReadDocument,
   issuePageToken,
-  verifyPageToken,
+  redeemPageToken,
   issueAudioToken,
   verifyAudioToken,
 } from "./security/authz.js";
@@ -73,9 +77,14 @@ import {
   PAGE_TOKEN_TTL_SECONDS,
   AUDIO_TOKEN_TTL_SECONDS,
   SESSION_IDLE_MINUTES,
+  LOGIN_IP_LIMIT_PER_MINUTE,
+  LOGIN_ACCOUNT_FAIL_LIMIT,
+  LOGIN_ACCOUNT_WINDOW_SECONDS,
   MAX_UPLOAD_BYTES,
   MAX_PDF_PAGES,
   SEED_MANIFEST_PATH,
+  isDemoPersonasEnabled,
+  isFrameEmbedAllowed,
 } from "./config.js";
 
 /**
@@ -146,7 +155,7 @@ function safeDocument(doc) {
 export function currentUser(req) {
   const cookies = parseCookies(req);
   let sessionId = cookies[SESSION_COOKIE];
-  if (!sessionId && process.env.CV_ALLOW_FRAME_EMBED === "1") {
+  if (!sessionId && isFrameEmbedAllowed()) {
     const fallback = req.headers["x-cv-session"];
     if (typeof fallback === "string" && fallback.length > 0) {
       sessionId = fallback.trim();
@@ -241,19 +250,56 @@ async function handleAuth(req, res) {
     if (req.method !== "GET") return methodNotAllowed(res, "GET");
     return handleDemoPersonas(req, res);
   }
+  if (action === "demo-login") {
+    if (req.method !== "POST") return methodNotAllowed(res, "POST");
+    return handleDemoLogin(req, res);
+  }
   return notFound(res);
 }
 
-function handleDemoPersonas(_req, res) {
-  if (process.env.NODE_ENV === "production") {
-    return sendJson(res, 200, { ok: true, enabled: false, personas: [] });
+const DEMO_PERSONA_EMAILS = {
+  admin: "admin@strata.local",
+  studentA: "aisyah@student.strata.local",
+  studentB: "weiming@student.strata.local",
+  studentC: "priya@student.strata.local",
+};
+
+function issueSessionResponse(req, res, session) {
+  const idleSeconds = SESSION_IDLE_MINUTES * 60;
+  const secure = isSecureRequest(req);
+  const embedMode = isFrameEmbedAllowed();
+
+  res.setHeader(
+    "Set-Cookie",
+    serializeCookie(SESSION_COOKIE, session.sessionId, {
+      maxAge: idleSeconds,
+      httpOnly: true,
+      secure,
+      sameSite: embedMode && secure ? "None" : "Strict",
+      partitioned: Boolean(embedMode && secure),
+    }),
+  );
+
+  const responsePayload = { ok: true, user: session.user };
+  if (embedMode) {
+    responsePayload.previewSession = session.sessionId;
   }
-  const adminPass =
-    process.env.CV_DEMO_ADMIN_PASSWORD || "strata-demo-admin-local";
-  const studentPass =
-    process.env.CV_DEMO_STUDENT_PASSWORD || "strata-demo-student-local";
+  return sendJson(res, 200, responsePayload);
+}
+
+function handleDemoPersonas(_req, res) {
+  if (!isDemoPersonasEnabled()) {
+    return sendError(
+      res,
+      403,
+      "demo_personas_disabled",
+      "Demo persona directory is disabled by default. Set CV_ENABLE_DEMO_PERSONAS=1 in local non-production evaluation only.",
+      { enabled: false, personas: [] },
+    );
+  }
   const demoDocIdValue = requireDemoDocId();
 
+  // SEC-002: Never include passwords or secrets in API responses.
   return sendJson(res, 200, {
     ok: true,
     enabled: true,
@@ -261,17 +307,15 @@ function handleDemoPersonas(_req, res) {
     personas: [
       {
         id: "admin",
-        email: "admin@strata.local",
-        password: adminPass,
+        email: DEMO_PERSONA_EMAILS.admin,
         labelEn: "Administrator",
         labelZh: "平台管理员",
-        noteEn: "Upload PDFs, grant/revoke access, audit logs",
-        noteZh: "上传受保护文档、授权/撤销访问、审计日志",
+        noteEn: "Upload PDFs, grant/revoke access, audit logs & M007 review",
+        noteZh: "上传受保护文档、授权/撤销访问、审计日志及 M007 审阅",
       },
       {
         id: "studentA",
-        email: "aisyah@student.strata.local",
-        password: studentPass,
+        email: DEMO_PERSONA_EMAILS.studentA,
         labelEn: "Student A · Nurul Aisyah",
         labelZh: "学员 A · Nurul Aisyah",
         noteEn: "Entitled · Unique burned-in watermark A",
@@ -279,8 +323,7 @@ function handleDemoPersonas(_req, res) {
       },
       {
         id: "studentB",
-        email: "weiming@student.strata.local",
-        password: studentPass,
+        email: DEMO_PERSONA_EMAILS.studentB,
         labelEn: "Student B · Tan Wei Ming",
         labelZh: "学员 B · Tan Wei Ming",
         noteEn: "Entitled · Distinct burned-in watermark B",
@@ -288,8 +331,7 @@ function handleDemoPersonas(_req, res) {
       },
       {
         id: "studentC",
-        email: "priya@student.strata.local",
-        password: studentPass,
+        email: DEMO_PERSONA_EMAILS.studentC,
         labelEn: "Student C · Priya Menon",
         labelZh: "学员 C · Priya Menon",
         noteEn: "Unentitled · Demonstrates 403 access denial",
@@ -299,10 +341,66 @@ function handleDemoPersonas(_req, res) {
   });
 }
 
+async function handleDemoLogin(req, res) {
+  if (!isDemoPersonasEnabled()) {
+    audit({
+      event: "auth.demo_login",
+      outcome: "deny",
+      ip: extractIp(req),
+      userAgent: userAgent(req),
+      detail: { reason: "demo_personas_disabled" },
+    });
+    return sendError(
+      res,
+      403,
+      "demo_personas_disabled",
+      "Quick-switch demo login is disabled unless CV_ENABLE_DEMO_PERSONAS=1 in non-production.",
+    );
+  }
+
+  const meta = { ip: extractIp(req), userAgent: userAgent(req) };
+  const limiter = rateLimit(`demologin:ip:${meta.ip}`, LOGIN_IP_LIMIT_PER_MINUTE, 60);
+  if (!limiter.allowed) {
+    res.setHeader("Retry-After", String(limiter.retryAfter || 60));
+    return sendError(res, 429, "rate_limited", "Too many login attempts.");
+  }
+
+  let body;
+  try {
+    body = await readJson(req);
+  } catch (error) {
+    return sendError(res, error.statusCode || 400, "bad_request", error.message);
+  }
+
+  const personaId = String(body.personaId || "").trim();
+  const targetEmail = DEMO_PERSONA_EMAILS[personaId];
+  if (!targetEmail) {
+    return sendError(res, 400, "bad_request", "Unknown demo persona identifier.");
+  }
+
+  const user = findUserByEmail(targetEmail);
+  if (!user || user.disabled_at || Number(user.is_demo) !== 1) {
+    return sendError(res, 404, "demo_account_unavailable", "Seeded demo persona not found.");
+  }
+
+  const session = createSessionForUser(user, {
+    ...meta,
+    eventDetail: { mode: "demo_persona_switch", personaId },
+  });
+  return issueSessionResponse(req, res, session);
+}
+
 async function handleLogin(req, res) {
   const meta = { ip: extractIp(req), userAgent: userAgent(req) };
-  const limiter = rateLimit(`login:${meta.ip}`, 25, 60);
+  const limiter = rateLimit(`login:ip:${meta.ip}`, LOGIN_IP_LIMIT_PER_MINUTE, 60);
   if (!limiter.allowed) {
+    audit({
+      event: "auth.login",
+      outcome: "deny",
+      ip: meta.ip,
+      userAgent: meta.userAgent,
+      detail: { reason: "ip_rate_limited" },
+    });
     res.setHeader("Retry-After", String(limiter.retryAfter || 60));
     return sendError(res, 429, "rate_limited", "Too many login attempts.", {
       retryAfter: limiter.retryAfter,
@@ -320,6 +418,32 @@ async function handleLogin(req, res) {
     return sendError(res, 400, "bad_request", "Email and password are required.");
   }
 
+  const normalizedEmail = body.email.trim().toLowerCase().slice(0, 180);
+  const acctKey = `login:acct:${normalizedEmail}`;
+  const acctStatus = rateLimit(
+    acctKey,
+    LOGIN_ACCOUNT_FAIL_LIMIT,
+    LOGIN_ACCOUNT_WINDOW_SECONDS,
+    { increment: false },
+  );
+  if (!acctStatus.allowed) {
+    audit({
+      event: "auth.login",
+      outcome: "deny",
+      ip: meta.ip,
+      userAgent: meta.userAgent,
+      detail: { reason: "account_throttled", email: normalizedEmail },
+    });
+    res.setHeader("Retry-After", String(acctStatus.retryAfter || LOGIN_ACCOUNT_WINDOW_SECONDS));
+    return sendError(
+      res,
+      429,
+      "rate_limited",
+      "Account temporarily throttled due to repeated failed sign-in attempts.",
+      { retryAfter: acctStatus.retryAfter },
+    );
+  }
+
   let session;
   try {
     session = login({ email: body.email, password: body.password, ...meta });
@@ -335,29 +459,14 @@ async function handleLogin(req, res) {
   }
 
   if (!session) {
+    rateLimit(acctKey, LOGIN_ACCOUNT_FAIL_LIMIT, LOGIN_ACCOUNT_WINDOW_SECONDS, {
+      increment: true,
+    });
     return sendError(res, 401, "invalid_credentials", "Email or password is incorrect.");
   }
 
-  const idleSeconds = SESSION_IDLE_MINUTES * 60;
-  const secure = isSecureRequest(req);
-  const embedMode = process.env.CV_ALLOW_FRAME_EMBED === "1";
-
-  res.setHeader(
-    "Set-Cookie",
-    serializeCookie(SESSION_COOKIE, session.sessionId, {
-      maxAge: idleSeconds,
-      httpOnly: true,
-      secure: embedMode ? secure : secure,
-      sameSite: embedMode && secure ? "None" : "Strict",
-      partitioned: Boolean(embedMode && secure),
-    }),
-  );
-
-  const responsePayload = { ok: true, user: session.user };
-  if (embedMode) {
-    responsePayload.previewSession = session.sessionId;
-  }
-  return sendJson(res, 200, responsePayload);
+  clearRateLimit(acctKey);
+  return issueSessionResponse(req, res, session);
 }
 
 async function handleLogout(req, res) {
@@ -365,7 +474,7 @@ async function handleLogout(req, res) {
   const cookies = parseCookies(req);
   const sid =
     cookies[SESSION_COOKIE] ||
-    (process.env.CV_ALLOW_FRAME_EMBED === "1"
+    (isFrameEmbedAllowed()
       ? String(req.headers["x-cv-session"] || "").trim()
       : "");
   if (sid) {
@@ -397,13 +506,13 @@ async function handleRegister(req, res) {
     typeof body.email !== "string" ||
     typeof body.password !== "string" ||
     typeof body.displayName !== "string" ||
-    !["admin", "student"].includes(body.role)
+    !VALID_ROLES.includes(body.role)
   ) {
     return sendError(
       res,
       400,
       "bad_request",
-      "email, password, displayName and role (admin|student) are required.",
+      "email, password, displayName and role (admin|reviewer|student) are required.",
     );
   }
   try {
@@ -958,11 +1067,12 @@ async function handlePage(req, res, documentId) {
 
   const entitlement = verdict.entitlement;
 
-  // If a signed page token is supplied, verify signature, purpose, expiry,
-  // subject identity, document, page AND current entitlement version.
+  // SEC-005: When a signed page token is supplied, verify signature, purpose,
+  // expiry, subject identity, document, page, current entitlement version, AND
+  // atomically redeem its jti so each X-Page-Token is strictly single-use.
   if (query.token !== undefined) {
     try {
-      const claims = verifyPageToken(query.token);
+      const claims = redeemPageToken(query.token);
       if (
         claims.sub !== user.id ||
         claims.doc !== documentId ||
@@ -983,6 +1093,7 @@ async function handlePage(req, res, documentId) {
         return sendError(res, 403, "invalid_page_token", "Page token does not match current session or entitlement.");
       }
     } catch (error) {
+      const errCode = error.code === "token_replayed" ? "token_replayed" : "invalid_page_token";
       audit({
         event: "page.render",
         outcome: "deny",
@@ -994,7 +1105,7 @@ async function handlePage(req, res, documentId) {
         userAgent: userAgent(req),
         detail: { reason: error.code || "invalid_page_token" },
       });
-      return sendError(res, 403, "invalid_page_token", error.message);
+      return sendError(res, 403, errCode, error.message);
     }
   }
 
@@ -1017,7 +1128,7 @@ async function handlePage(req, res, documentId) {
   const chapter = findChapterForPage(documentId, page);
   const audioToken =
     chapter && chapter.audio_key
-      ? issueAudioToken(user, documentId, page, entitlement.version)
+      ? issueAudioToken(user, documentId, page, entitlement.version, chapter.id)
       : null;
 
   try {
@@ -1130,13 +1241,21 @@ async function handleAudio(req, res, documentId) {
   }
 
   const query = parseQuery(req.url);
+  const page = Number(req.headers["x-page"] ?? query.page ?? 1);
+  const chapter = query.chapter
+    ? findChapterById(documentId, String(query.chapter))
+    : findChapterForPage(documentId, Number.isFinite(page) && page >= 1 ? page : 1);
+
   if (query.token !== undefined) {
     try {
       const claims = verifyAudioToken(query.token);
+      const chapterMismatch =
+        Boolean(claims.ch) && Boolean(chapter) && String(claims.ch) !== String(chapter.id);
       if (
         claims.sub !== user.id ||
         claims.doc !== documentId ||
-        Number(claims.ent) !== Number(verdict.entitlement.version)
+        Number(claims.ent) !== Number(verdict.entitlement.version) ||
+        chapterMismatch
       ) {
         audit({
           event: "audio.play",
@@ -1148,7 +1267,7 @@ async function handleAudio(req, res, documentId) {
           userAgent: userAgent(req),
           detail: { reason: "audio_token_claim_mismatch" },
         });
-        return sendError(res, 403, "invalid_audio_token", "Audio token is not valid for this session.");
+        return sendError(res, 403, "invalid_audio_token", "Audio token is not valid for this session or chapter.");
       }
     } catch (error) {
       audit({
@@ -1164,11 +1283,6 @@ async function handleAudio(req, res, documentId) {
       return sendError(res, 403, "invalid_audio_token", error.message);
     }
   }
-
-  const page = Number(req.headers["x-page"] ?? query.page ?? 1);
-  const chapter = query.chapter
-    ? findChapterById(documentId, String(query.chapter))
-    : findChapterForPage(documentId, Number.isFinite(page) && page >= 1 ? page : 1);
 
   if (!chapter || !chapter.audio_key) {
     return sendError(res, 404, "no_audio", "No audio track is attached to this section.");
@@ -1407,6 +1521,7 @@ async function handleEngineSelftest(req, res) {
 }
 
 export {
+  canViewPortfolio,
   handleAuth,
   handleDocuments,
   handleDocumentDetail,

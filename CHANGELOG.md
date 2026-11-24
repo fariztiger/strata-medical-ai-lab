@@ -2,6 +2,18 @@
 
 All notable changes to `strata-medical-ai-lab` are documented in this file.
 
+## [0.1.2] — 2026-11-24 (Mission 003-A: Security Hardening & Production Isolation)
+
+### Security (`SEC-001` .. `SEC-005`)
+- **SEC-001 (Portfolio Access Control):** Restricted `/portfolio`, `/portfolio/*`, and `GET/POST /api/portfolio/enquiries` to authenticated `admin` and `reviewer` accounts (`401` anonymous, `403` student), recorded `portfolio.access` audit events, and preserved `noindex` + `no-store` headers.
+- **SEC-002 (Production Isolation & Session Cap):** Disabled `/api/auth/demo-personas` and `/api/auth/demo-login` by default (`CV_ENABLE_DEMO_PERSONAS=1` required in local non-prod), stripped all password fields from API JSON, blocked `seed.js` and `CV_ALLOW_FRAME_EMBED=1` in production, refused production startup when active demo accounts exist in SQLite, and enforced a 12-hour absolute session lifetime (`CV_SESSION_MAX_HOURS`).
+- **SEC-003 (Rate-Limit Integrity):** Stopped trusting `X-Forwarded-*` by default, added `CV_TRUST_PROXY` with right-to-left hop boundary extraction, and implemented per-account failed-login throttling (`8` failures / `300s`) alongside IP rate limiting.
+- **SEC-004 (International Watermarks):** Enabled deterministic Mandarin and extended Unicode watermark rendering on minimal Linux systems via PyMuPDF's embedded Apache-2.0 `Droid Sans Fallback` TrueType font (`FONT_LICENSES.md`).
+- **SEC-005 (Watermark Resilience & Single-Use Page Tokens):** Upgraded watermarks to cycle achromatic Neutral Slate, Cool Teal-Navy, and Warm Ochre tiles with counter-angled body-text traces, enforced atomic single-use `X-Page-Token` redemption (`token_redemptions`), and preserved bounded-window HTTP `206` Range streaming on `X-Audio-Token`.
+
+### Fixed & Added (Priority 3 & 4)
+- Downgraded `JRN-003`..`JRN-005` (`M003`) and M007 *Clinical Neurophysiology* to `PARTIALLY_VERIFIED`, completed 100% Simplified Chinese (`中文`) localization in `apps/strata-website/public/`, pinned `packages/watermark-engine/requirements.txt`, added `tests/security-003a.test.js` (`32/32` total tests passing) + `scripts/verification/playwright-e2e.mjs`, and published `reports/SECURITY_REMEDIATION_003.md`.
+
 ## [0.1.1] — 2026-11-24 (Four-Persona E2E Verification, Primary-Source M002/M003 Audit & M007 Portfolio Prototype)
 
 ### Added

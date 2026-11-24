@@ -35,7 +35,17 @@ ContentVault v0.1 demonstrates functional server-side access control and pixel-c
 - **Limitation:** Login and page-render rate limiting (`src/http/helpers.js`) lives in Node process memory (`Map`), which resets on restart and is not shared across horizontal replicas. Private PDF/audio objects reside in `var/storage/private/` protected by OS `0600` file permissions rather than cloud IAM/KMS encryption-at-rest.
 - **Required Production Migration:** Move private objects to Supabase Private Storage or Cloudflare R2 (with server-only credentials) and enforce rate limits via a shared store.
 
-## 6. Rasterized Page Text Selection & Screen-Reader Accessibility
+## 6. Watermark Image-Processing Resilience vs. Advanced Inpainting (`SEC-005`)
+
+- **Mitigation Implemented (`SEC-005`):** Watermark tiles cycle across three orthogonal ink profiles—achromatic Neutral Slate (`R ≈ G ≈ B`), Cool Deep Teal-Navy (`B > R`), and Warm Champagne Ochre (`R > B`)—combined with a counter-angled (`-26°`) central trace intersecting body-text glyphs and a neutral bottom forensic edge stamp. Simple single-hue, channel-difference (`R - B`), or chromatic saturation scrubbing filters leave the neutral tiles and glyph intersections intact (`~87%` pixel-mark retention under full-chroma scrubbing).
+- **Realistic Limitation:** ContentVault is **not piracy-proof**. A determined adversary using manual retouching, generative AI / diffusion inpainting, or OCR text re-typesetting can degrade or reconstruct unwatermarked text at significant per-page effort.
+
+## 7. Token Model & Session Lifetime Boundaries (`SEC-002` / `SEC-005`)
+
+- **Token Semantics:** `X-Page-Token` (`45s` TTL) is strictly **single-use** (`jti` recorded atomically in `token_redemptions` on first use; any replay returns `HTTP 403 token_replayed`). Conversely, `X-Audio-Token` (`60s` TTL) is a **bounded-window stream token** bound to `(sub, doc, chapter, ent_version)` so HTML5 `<audio>` players can issue multiple legitimate HTTP `206` byte-range requests during playback while still failing immediately on revocation, expiry, or cross-student sharing.
+- **Session Lifetime:** Sessions enforce both a rolling idle timeout (`120 min` default) and an absolute maximum lifetime (`12 hours` default, `CV_SESSION_MAX_HOURS`).
+
+## 8. Rasterized Page Text Selection & Screen-Reader Accessibility
 
 - **Limitation:** Delivering rasterized PNGs instead of DOM text or PDFs intentionally prevents one-click text copying, which also means screen readers cannot read body paragraphs directly from the page image.
 - **Planned Enhancement (P1):** Provide authorized, watermarked/attributed structured accessible chapter summaries and audio companions alongside the visual page reader.

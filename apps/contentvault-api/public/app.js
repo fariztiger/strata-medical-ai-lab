@@ -369,6 +369,13 @@
 
     $("view-login").classList.toggle("hidden", Boolean(currentUser));
     $("header-session-box").classList.toggle("hidden", !currentUser);
+    const canSeePortfolio =
+      Boolean(currentUser) &&
+      (currentUser.role === "admin" || currentUser.role === "reviewer");
+    const pfLink = $("header-portfolio-link");
+    if (pfLink) {
+      pfLink.classList.toggle("hidden", !canSeePortfolio);
+    }
 
     if (!currentUser) {
       $("view-student").classList.add("hidden");
@@ -424,10 +431,22 @@
       const label = currentLocale === "zh" ? p.labelZh : p.labelEn;
       const note = currentLocale === "zh" ? p.noteZh : p.noteEn;
       btn.innerHTML = `<strong>${escapeHtml(label)}</strong><span>${escapeHtml(note)}</span>`;
-      btn.addEventListener("click", () => {
-        $("login-email").value = p.email;
-        $("login-password").value = p.password;
-        $("login-form").requestSubmit();
+      btn.addEventListener("click", async () => {
+        const errBox = $("login-error");
+        errBox.classList.add("hidden");
+        const { ok, data } = await apiJson("/api/auth/demo-login", {
+          method: "POST",
+          body: { personaId: p.id },
+        });
+        if (!ok) {
+          errBox.textContent = data.message || "Demo sign-in unavailable.";
+          errBox.classList.remove("hidden");
+          return;
+        }
+        if (data.previewSession) {
+          setPreviewSession(data.previewSession);
+        }
+        applySessionState(data.user);
       });
       grid.appendChild(btn);
     }

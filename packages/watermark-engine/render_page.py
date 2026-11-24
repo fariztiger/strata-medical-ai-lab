@@ -1,29 +1,29 @@
 #!/usr/bin/env python3
 """
-STRATA ContentVault watermark engine.
+STRATA ContentVault watermark engine (Hardened — Mission 003-A: SEC-004 & SEC-005).
 
 Rasterises a page of a private PDF and burns a per-student watermark into the
 pixel data. Invoked by the trusted Node API with a JSON request on stdin and a
 JSON response on stdout. No shell interpolation of paths or identifiers.
 
-Commands
---------
-probe     Report page count and dimensions without rendering.
-render    Rasterise one page with the watermark baked into the pixels.
-selftest  Render one page for two identities and prove the bytes differ.
-          This is the evidence behind acceptance test CV-019.
-
-Why a burned-in mark
---------------------
-The watermark is composited into the RGBA raster before PNG encoding. There is
-no CSS overlay, no separate DOM layer and no client-side drawing step, so a
-student cannot remove it by editing stylesheets or the DOM. Any screenshot or
-saved image carries the identity of the account that requested it.
+Security & Internationalisation Properties
+------------------------------------------
+1. Burned-in RGBA pixel compositing (no removable CSS/DOM overlay — CV-019).
+2. Deterministic pan-Unicode & Mandarin (CJK) glyph rendering on minimal Linux
+   containers via PyMuPDF's embedded Apache-2.0 Droid Sans Fallback TrueType
+   buffer (`pymupdf.Font("china-ss").buffer`) when no OS CJK font is installed
+   (SEC-004).
+3. Multi-chromatic + achromatic neutral tiling (`+28 deg` primary staggered grid
+   cycling Neutral Slate, Cool Teal-Navy, and Champagne Ochre + `-26 deg`
+   content-intersecting neutral trace + edge stamp) to resist simple single-hue,
+   channel-difference, and saturation threshold filters while keeping clinical
+   typography legible (SEC-005).
 """
 
 from __future__ import annotations
 
 import base64
+import functools
 import hashlib
 import io
 import json
@@ -33,20 +33,23 @@ import time
 
 try:
     import pymupdf  # PyMuPDF >= 1.24 exposes the canonical module name
-except ImportError:  # pragma: no cover - compatibility with older installs
+except ImportError:  # pragma: no cover
     import fitz as pymupdf  # type: ignore
 
 from PIL import Image, ImageDraw, ImageFont
 
 MAX_DIMENSION = 2600
 
-# Champagne-gold mark. Opacity is deliberately strong enough to be clearly
-# visible on a printed page or screenshot (that is the deterrence), while the
-# thin glyph coverage keeps body text readable underneath.
-INK = (146, 92, 26)
-INK_EDGE = (96, 60, 16)
-TILE_OPACITY = 74   # out of 255 - visible, not blinding
-EDGE_OPACITY = 150
+# SEC-005: Three orthogonal ink channels (Achromatic Slate, Cool Teal-Navy, Warm Ochre)
+# prevent single-color or R-B / saturation filters from stripping the watermark.
+TILE_PALETTE = (
+    (56, 60, 64, 72),    # Neutral Slate (achromatic: R ~= G ~= B)
+    (24, 76, 92, 74),    # Cool Deep Teal-Navy (B > R)
+    (138, 86, 28, 76),   # Warm Champagne Ochre (R > B)
+)
+CROSS_TRACE_RGBA = (62, 66, 72, 46)
+INK_EDGE = (46, 54, 64)
+EDGE_OPACITY = 152
 
 
 def fail(code: str, message: str) -> None:
@@ -55,47 +58,88 @@ def fail(code: str, message: str) -> None:
     raise SystemExit(2)
 
 
+@functools.lru_cache(maxsize=1)
+def _embedded_cjk_ttf_bytes() -> bytes | None:
+    """
+    Extract the Apache-2.0 licensed Droid Sans Fallback Regular TrueType font
+    compiled into PyMuPDF (`china-ss`) so Mandarin, Japanese, Korean, and
+    extended Unicode names render deterministically on minimal Linux systems.
+    """
+    try:
+        font_obj = pymupdf.Font("china-ss")
+        buf = bytes(font_obj.buffer)
+        return buf if len(buf) > 1024 else None
+    except Exception:
+        return None
+
+
 def load_font(size: int, text: str = "") -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     """
-    Prefer a real TrueType face for legibility; fall back to the bundled
-    bitmap font so the engine still works on a minimal machine.
+    Resolve a TrueType/OpenType font capable of rendering `text`:
+    1. Explicit `CV_WATERMARK_FONT_PATH` if configured.
+    2. Installed OS CJK or Latin TrueType fonts when appropriate.
+    3. Embedded PyMuPDF `china-ss` (Droid Sans Fallback Regular, Apache-2.0) for
+       guaranteed CJK/Unicode coverage on minimal Linux containers (SEC-004).
     """
-    needs_cjk = any(ord(ch) > 0x2E80 for ch in text)
+    custom_font = os.environ.get("CV_WATERMARK_FONT_PATH", "").strip()
+    if custom_font and os.path.isfile(custom_font):
+        try:
+            return ImageFont.truetype(custom_font, size)
+        except OSError:
+            pass
+
+    needs_non_ascii = any(ord(ch) > 0x024F for ch in text)
     cjk_candidates = [
-        r"C:\Windows\Fonts\msyh.ttc",
-        r"C:\Windows\Fonts\simhei.ttf",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        r"C:\Windows\Fonts\msyh.ttc",
+        r"C:\Windows\Fonts\simhei.ttf",
         "/System/Library/Fonts/PingFang.ttc",
     ]
     latin_candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         r"C:\Windows\Fonts\segoeui.ttf",
         r"C:\Windows\Fonts\arial.ttf",
         r"C:\Windows\Fonts\calibri.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/System/Library/Fonts/Supplemental/Arial.ttf",
     ]
-    candidates = (cjk_candidates + latin_candidates) if needs_cjk else latin_candidates
-    for path in candidates:
+
+    if needs_non_ascii:
+        for path in cjk_candidates:
+            if os.path.isfile(path):
+                try:
+                    return ImageFont.truetype(path, size)
+                except OSError:
+                    continue
+        embedded = _embedded_cjk_ttf_bytes()
+        if embedded:
+            try:
+                return ImageFont.truetype(io.BytesIO(embedded), size)
+            except OSError:
+                pass
+
+    for path in latin_candidates + cjk_candidates:
         if os.path.isfile(path):
             try:
                 return ImageFont.truetype(path, size)
             except OSError:
                 continue
+
+    embedded = _embedded_cjk_ttf_bytes()
+    if embedded:
+        try:
+            return ImageFont.truetype(io.BytesIO(embedded), size)
+        except OSError:
+            pass
+
     return ImageFont.load_default()
 
 
-def has_cjk_font() -> bool:
-    for path in (
-        r"C:\Windows\Fonts\msyh.ttc",
-        r"C:\Windows\Fonts\simhei.ttf",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-        "/System/Library/Fonts/PingFang.ttc",
-    ):
-        if os.path.isfile(path):
-            return True
-    return False
+def sanitize_unicode_field(raw: object, max_len: int) -> str:
+    """Preserve printable Unicode (including CJK, accents, symbols) while stripping control chars."""
+    text = "".join(ch for ch in str(raw or "") if ch.isprintable() and ch not in "\r\n\t\x00")
+    return text.strip()[:max_len]
 
 
 def probe(path: str) -> dict:
@@ -103,7 +147,7 @@ def probe(path: str) -> dict:
         fail("missing_file", "PDF file not found.")
     try:
         doc = pymupdf.open(path)
-    except Exception as error:  # corrupt or unsupported file
+    except Exception as error:
         fail("unreadable", f"Could not open PDF: {type(error).__name__}")
     try:
         if doc.needs_pass:
@@ -123,25 +167,27 @@ def probe(path: str) -> dict:
 
 def watermark_text(identity: dict, page_number: int, total: int) -> str:
     """
-    Build the mark from server-supplied fields only.
-
-    The caller (Node API) constructs `identity` from the authenticated session
-    row. A client cannot inject this string.
+    Build the mark from server-supplied fields only, preserving full Unicode
+    names (Mandarin, Malay, Tamil, accented Latin, mixed-script — SEC-004).
     """
-    raw_label = str(identity.get("label") or "").strip()[:60]
-    if raw_label and any(ord(ch) > 0x2E80 for ch in raw_label) and not has_cjk_font():
-        ascii_only = "".join(ch for ch in raw_label if ord(ch) < 0x2E80).strip(" -·()")
-        label = ascii_only or "Learner"
-    else:
-        label = raw_label
-    ref = str(identity.get("ref") or "").strip()[:40]
-    stamp = str(identity.get("stamp") or "").strip()[:32]
+    label = sanitize_unicode_field(identity.get("label"), 60) or "Authorized Learner"
+    ref = sanitize_unicode_field(identity.get("ref"), 40)
+    stamp = sanitize_unicode_field(identity.get("stamp"), 32)
     parts = [label, ref, f"p.{page_number}/{total}", stamp]
     return "  ·  ".join(part for part in parts if part)
 
 
-def apply_watermark(image: Image.Image, mark: str, page_number: int, total: int) -> Image.Image:
-    """Composite the diagonal repeating tile plus an edge stamp onto the page."""
+def apply_watermark(
+    image: Image.Image,
+    mark: str,
+    page_number: int,
+    total: int,
+    short_ref: str = "",
+) -> Image.Image:
+    """
+    Composite a multi-chromatic + neutral diagonal staggered grid, counter-angled
+    central trace, and bottom forensic edge stamp directly into the page pixels.
+    """
     base = image.convert("RGBA")
     width, height = base.size
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
@@ -150,41 +196,49 @@ def apply_watermark(image: Image.Image, mark: str, page_number: int, total: int)
     font_size = max(12, int(min(width, height) / 34))
     font = load_font(font_size, mark)
 
-    # Measure once, then lay out a staggered grid across the whole surface so
-    # the identity recurs everywhere and cannot be cropped away in one place.
     probe_bbox = draw.textbbox((0, 0), mark, font=font)
     text_w = max(probe_bbox[2] - probe_bbox[0], 1)
     text_h = max(probe_bbox[3] - probe_bbox[1], 1)
 
-    # Denser tiling than the bare minimum: roughly three columns and eight rows
-    # of the mark across an A4 page.
-    step_x = text_w + int(width * 0.04) + 16
-    step_y = text_h + int(height * 0.055) + 18
-    step_x = max(step_x, int(width / 3.1))
-    step_y = max(step_y, int(height / 8.5))
+    step_x = max(text_w + int(width * 0.04) + 16, int(width / 3.1))
+    step_y = max(text_h + int(height * 0.055) + 18, int(height / 8.5))
 
-    tile = Image.new("RGBA", (step_x, step_y), (0, 0, 0, 0))
-    tile_draw = ImageDraw.Draw(tile)
-    tile_draw.text(
-        (12, 6),
-        mark,
-        font=font,
-        fill=(*INK, TILE_OPACITY),
-    )
-    tile = tile.rotate(30, expand=True, resample=Image.BICUBIC)
+    # Pre-render one rotated tile for each of the 3 orthogonal ink profiles (SEC-005).
+    palette_tiles: list[Image.Image] = []
+    for rgba in TILE_PALETTE:
+        tile = Image.new("RGBA", (step_x, step_y), (0, 0, 0, 0))
+        tile_draw = ImageDraw.Draw(tile)
+        tile_draw.text((12, 6), mark, font=font, fill=rgba)
+        palette_tiles.append(tile.rotate(28, expand=True, resample=Image.BICUBIC))
 
     for row, y in enumerate(range(-step_y, height + step_y, step_y)):
         offset = -step_x // 2 if row % 2 else 0
-        for x in range(-step_x + offset, width + step_x, step_x):
-            overlay.alpha_composite(tile, (x, y))
+        for col, x in enumerate(range(-step_x + offset, width + step_x, step_x)):
+            chosen_tile = palette_tiles[(row + col) % len(palette_tiles)]
+            overlay.alpha_composite(chosen_tile, (x, y))
 
-    # Edge stamp: survives a tight crop of the body text.
+    # Secondary counter-angled (-26 deg) achromatic trace across body-text zones
+    # so intersections with dark glyphs survive aggressive background bleaching.
+    trace_label = f"{short_ref or mark[:28]} · p.{page_number}/{total}"
+    trace_size = max(10, int(min(width, height) / 48))
+    trace_font = load_font(trace_size, trace_label)
+    tb = draw.textbbox((0, 0), trace_label, font=trace_font)
+    tw = max(tb[2] - tb[0] + 24, 120)
+    th = max(tb[3] - tb[1] + 16, 32)
+    trace_tile = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+    ImageDraw.Draw(trace_tile).text((8, 4), trace_label, font=trace_font, fill=CROSS_TRACE_RGBA)
+    trace_rot = trace_tile.rotate(-26, expand=True, resample=Image.BICUBIC)
+    for band_y in (int(height * 0.22), int(height * 0.50), int(height * 0.76)):
+        for band_x in (int(width * 0.16), int(width * 0.54)):
+            overlay.alpha_composite(trace_rot, (band_x, band_y))
+
+    # Bottom forensic edge stamp in neutral slate.
     edge_size = max(10, int(min(width, height) / 60))
     edge_font = load_font(edge_size, mark)
     edge_mark = f"STRATA ContentVault · {mark}"
     draw.rectangle(
         [(0, height - edge_size * 2 - 8), (width, height)],
-        fill=(255, 255, 255, 40),
+        fill=(255, 255, 255, 44),
     )
     draw.text(
         (edge_size, height - edge_size * 2),
@@ -271,8 +325,9 @@ def render(
                         pass
 
         mark = watermark_text(identity, page_number, total)
+        short_ref = sanitize_unicode_field(identity.get("ref") or identity.get("label"), 36)
         if with_watermark:
-            image = apply_watermark(image, mark, page_number, total)
+            image = apply_watermark(image, mark, page_number, total, short_ref=short_ref)
 
         buffer = io.BytesIO()
         image.save(buffer, format="PNG", optimize=False)
@@ -295,11 +350,17 @@ def render(
 
 
 def selftest(path: str, page_number: int = 1, dpi: int = 96) -> dict:
-    """Prove that two identities produce materially different pixels."""
+    """Prove that two identities (including CJK Unicode) produce materially different pixels."""
     stamp = "2026-11-24T12:00:00Z"
     a = render(path, page_number, dpi, {"label": "Student A", "ref": "usr_aaa111", "stamp": stamp})
-    b = render(path, page_number, dpi, {"label": "Student B", "ref": "usr_bbb222", "stamp": stamp})
-    clean = render(path, page_number, dpi, {"label": "Student A", "ref": "usr_aaa111", "stamp": stamp}, with_watermark=False)
+    b = render(path, page_number, dpi, {"label": "陈伟明 Student B", "ref": "usr_bbb222", "stamp": stamp})
+    clean = render(
+        path,
+        page_number,
+        dpi,
+        {"label": "Student A", "ref": "usr_aaa111", "stamp": stamp},
+        with_watermark=False,
+    )
 
     return {
         "ok": True,
@@ -354,7 +415,6 @@ def main() -> None:
     except (ValueError, TypeError) as error:
         fail("bad_request", str(error))
 
-    # The PNG payload goes on stdout exactly once, as a single JSON object.
     sys.stdout.write(json.dumps(result))
     sys.stdout.flush()
 

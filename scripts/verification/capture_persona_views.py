@@ -405,8 +405,12 @@ def capture_student_c_denied(student_pass: str, doc_id: str) -> None:
     save_png(pdf, "04-student-c-denied.png")
 
 
-def capture_m007_portfolio() -> None:
+def capture_m007_portfolio(admin_pass: str) -> None:
     sess = LiveSession()
+    st_anon, _, _ = sess.request("/portfolio")
+    assert st_anon == 401, f"Expected 401 anonymous rejection on /portfolio, got {st_anon}"
+    st_log, _, _ = sess.request("/api/auth/login", "POST", {"email": "admin@strata.local", "password": admin_pass})
+    assert st_log == 200
     st, hdrs, html_bytes = sess.request("/portfolio")
     assert st == 200 and b"PRIVATE PROTOTYPE" in html_bytes
 
@@ -517,7 +521,7 @@ def main() -> None:
     capture_student_reader("aisyah@student.strata.local", student_pass, doc_id, 2, "en", "02-student-a-reader-en.png")
     capture_student_reader("weiming@student.strata.local", student_pass, doc_id, 3, "zh", "03-student-b-reader-zh.png")
     capture_student_c_denied(student_pass, doc_id)
-    capture_m007_portfolio()
+    capture_m007_portfolio(admin_pass)
 
 
 if __name__ == "__main__":
