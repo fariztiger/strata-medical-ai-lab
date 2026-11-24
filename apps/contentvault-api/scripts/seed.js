@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Idempotent synthetic demo seed script for STRATA ContentVault v0.1.
+ * Idempotent synthetic demo seed script for STRATA ContentVault (SQLite & PostgreSQL 16).
  *
  * Creates:
  *   - 1 synthetic administrator account
@@ -19,17 +19,20 @@ import {
   isProduction,
   ensureDirs,
 } from "../src/config.js";
-import { closeDb, getDb } from "../src/db.js";
 import {
-  createUser,
-  findUserByEmail,
+  initializePersistence,
+  closePersistenceAdapter,
+} from "../src/persistence/adapter.js";
+import {
+  createUserAsync,
+  findUserByEmailAsync,
 } from "../src/security/authz.js";
 import {
-  createDocument,
-  listDocuments,
-  addChapter,
-  listChapters,
-  grantEntitlement,
+  createDocumentAsync,
+  listDocumentsAsync,
+  addChapterAsync,
+  listChaptersAsync,
+  grantEntitlementAsync,
 } from "../src/services/content.js";
 import { putPrivateObject } from "../src/services/storage.js";
 import { probePdf } from "../src/services/pdf-engine.js";
@@ -115,15 +118,24 @@ function resolveDemoPasswords() {
   };
 }
 
-function ensureAccount(spec, password) {
-  const existing = findUserByEmail(spec.email);
+async function ensureAccountAsync(spec, password) {
+  const seedActor = { role: "admin" };
+  const existing = await findUserByEmailAsync(seedActor, spec.email);
   if (existing) {
     if (Number(existing.is_demo) !== 1) {
-      getDb().prepare("UPDATE users SET is_demo = 1 WHERE id = ?").run(existing.id);
+      const adapter = await initializePersistence();
+      if (adapter.kind === "sqlite") {
+        adapter._getDb().prepare("UPDATE users SET is_demo = 1 WHERE id = ?").run(existing.id);
+      } else {
+        await adapter.withActorContext(seedActor, (tx) =>
+          tx.query("UPDATE users SET is_demo = TRUE WHERE id = $1", [existing.id]),
+        );
+      }
+      return findUserByEmailAsync(seedActor, spec.email);
     }
-    return findUserByEmail(spec.email);
+    return existing;
   }
-  return createUser({
+  return createUserAsync(seedActor, {
     email: spec.email,
     password,
     displayName: spec.displayName,
@@ -140,12 +152,13 @@ export async function seedDemoEnvironment() {
     );
   }
   ensureDirs();
+  await initializePersistence();
   const { adminPassword, studentPassword } = resolveDemoPasswords();
 
-  const admin = ensureAccount(DEMO_ACCOUNTS.admin, adminPassword);
-  const studentA = ensureAccount(DEMO_ACCOUNTS.studentA, studentPassword);
-  const studentB = ensureAccount(DEMO_ACCOUNTS.studentB, studentPassword);
-  const studentC = ensureAccount(DEMO_ACCOUNTS.studentC, studentPassword);
+  const admin = await ensureAccountAsync(DEMO_ACCOUNTS.admin, adminPassword);
+  const studentA = await ensureAccountAsync(DEMO_ACCOUNTS.studentA, studentPassword);
+  const studentB = await ensureAccountAsync(DEMO_ACCOUNTS.studentB, studentPassword);
+  const studentC = await ensureAccountAsync(DEMO_ACCOUNTS.studentC, studentPassword);
 
   const syntheticPdfPath = path.join(
     REPO_ROOT,
@@ -158,14 +171,15 @@ export async function seedDemoEnvironment() {
   }
 
   const demoTitleEn = "Neurology Teaching Module (Synthetic Demonstration)";
-  let document = listDocuments().find((doc) => doc.title_en === demoTitleEn);
+  const allDocs = await listDocumentsAsync(admin);
+  let document = allDocs.find((doc) => doc.title_en === demoTitleEn);
 
   if (!document) {
     const pdfBytes = fs.readFileSync(syntheticPdfPath);
     const probe = await probePdf(syntheticPdfPath);
     const storedPdf = await putPrivateObject(pdfBytes, "pdf");
 
-    document = createDocument({
+    document = await createDocumentAsync(admin, {
       titleEn: demoTitleEn,
       titleZh: "神经病学教学示范单元（合成演示内容）",
       author: "STRATA Medical AI Research Lab (Synthetic)",
@@ -180,7 +194,7 @@ export async function seedDemoEnvironment() {
     });
   }
 
-  const existingChapters = listChapters(document.id);
+  const existingChapters = await listChaptersAsync(admin, document.id);
   if (existingChapters.length === 0) {
     for (const ch of SYNTHETIC_CHAPTERS) {
       const wavBuffer = generateSyntheticTeachingWav({
@@ -188,7 +202,7 @@ export async function seedDemoEnvironment() {
         durationSeconds: ch.durationSeconds,
       });
       const storedAudio = await putPrivateObject(wavBuffer, "wav");
-      addChapter({
+      await addChapterAsync(admin, {
         documentId: document.id,
         ordinal: ch.ordinal,
         titleEn: ch.titleEn,
@@ -203,13 +217,13 @@ export async function seedDemoEnvironment() {
   }
 
   // Grant access to Student A and Student B; leave Student C unentitled.
-  grantEntitlement({
+  await grantEntitlementAsync(admin, {
     userId: studentA.id,
     documentId: document.id,
     grantedBy: admin.id,
     reason: "seed_demo_student_a",
   });
-  grantEntitlement({
+  await grantEntitlementAsync(admin, {
     userId: studentB.id,
     documentId: document.id,
     grantedBy: admin.id,
@@ -232,13 +246,15 @@ export async function seedDemoEnvironment() {
     mode: 0o600,
   });
 
+  const chapters = await listChaptersAsync(admin, document.id);
+
   return {
     admin,
     studentA,
     studentB,
     studentC,
     document,
-    chaptersCount: listChapters(document.id).length,
+    chaptersCount: chapters.length,
   };
 }
 
@@ -248,18 +264,18 @@ const isMain =
 
 if (isMain) {
   seedDemoEnvironment()
-    .then((summary) => {
+    .then(async (summary) => {
       console.log("STRATA ContentVault synthetic seed complete:");
       console.log(`  Document:   ${summary.document.id} (${summary.document.page_count} pages, ${summary.chaptersCount} chapters)`);
       console.log(`  Admin:      ${summary.admin.email}`);
       console.log(`  Student A:  ${summary.studentA.email} [entitled]`);
       console.log(`  Student B:  ${summary.studentB.email} [entitled]`);
       console.log(`  Student C:  ${summary.studentC.email} [unentitled]`);
-      closeDb();
+      await closePersistenceAdapter();
     })
-    .catch((error) => {
+    .catch(async (error) => {
       console.error("Seed failed:", error.message);
-      closeDb();
+      await closePersistenceAdapter().catch(() => {});
       process.exit(1);
     });
 }

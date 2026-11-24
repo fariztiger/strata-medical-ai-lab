@@ -1,9 +1,10 @@
 /**
- * ContentVault HTTP server factory.
+ * ContentVault HTTP server factory (Mission 005 Phase A/E).
  *
  * Separating server construction (`createAppServer`) from CLI binding
- * (`server.js`) allows acceptance tests to start an isolated ephemeral server
- * in-process with zero mocks while enforcing production safety invariants.
+ * (`server.js`) allows acceptance and PostgreSQL integration tests to start an
+ * isolated server in-process with zero mocks while enforcing fail-closed
+ * database and production safety invariants.
  */
 
 import { createServer } from "node:http";
@@ -15,12 +16,12 @@ import {
   sendError,
   sendBuffer,
   readJson,
-  rateLimit,
+  rateLimitAsync,
   isSameOriginMutating,
   clientIp,
 } from "./http/helpers.js";
 import {
-  currentUser,
+  currentUserAsync,
   canViewPortfolio,
   handleAuth,
   handleDocuments,
@@ -37,14 +38,20 @@ import {
   handleAdminAudit,
   handleEngineSelftest,
 } from "./routes.js";
-import { audit } from "./security/audit.js";
+import { auditAsync } from "./security/audit.js";
 import { newId } from "./security/crypto.js";
-import { getDb, nowIso } from "./db.js";
+import { getDb } from "./db.js";
+import {
+  getPersistenceAdapter,
+  getActivePersistenceAdapterSync,
+  initializePersistence,
+} from "./persistence/adapter.js";
 import {
   PUBLIC_DIR,
   PORTFOLIO_PUBLIC_DIR,
   assertProductionSafety,
   ensureDirs,
+  resolveDbBackend,
 } from "./config.js";
 
 const STATIC_MIME = {
@@ -103,11 +110,11 @@ function serveStaticFromRoot(rootDir, relPath, res, extraHeaders = {}) {
  * SEC-001: Enforce authenticated administrator or reviewer authorisation on all
  * private M007 portfolio assets and collaboration enquiry endpoints.
  */
-function ensurePortfolioAccess(req, res, pathname) {
-  const user = currentUser(req);
+async function ensurePortfolioAccessAsync(req, res, pathname) {
+  const user = await currentUserAsync(req);
   const ua = String(req.headers["user-agent"] || "").slice(0, 300);
   if (!user) {
-    audit({
+    await auditAsync({
       event: "portfolio.access",
       outcome: "deny",
       ip: clientIp(req),
@@ -125,15 +132,18 @@ function ensurePortfolioAccess(req, res, pathname) {
     return null;
   }
   if (!canViewPortfolio(user)) {
-    audit({
-      event: "portfolio.access",
-      outcome: "deny",
-      actorId: user.id,
-      actorRole: user.role,
-      ip: clientIp(req),
-      userAgent: ua,
-      detail: { reason: "insufficient_role", pathname },
-    });
+    await auditAsync(
+      {
+        event: "portfolio.access",
+        outcome: "deny",
+        actorId: user.id,
+        actorRole: user.role,
+        ip: clientIp(req),
+        userAgent: ua,
+        detail: { reason: "insufficient_role", pathname },
+      },
+      user,
+    );
     sendError(
       res,
       403,
@@ -149,10 +159,26 @@ function ensurePortfolioAccess(req, res, pathname) {
 
 export function createAppServer() {
   ensureDirs();
-  const database = getDb();
-  assertProductionSafety(database);
 
-  return createServer(async (req, res) => {
+  // Fail-closed backend validation: throws immediately on invalid backend or missing DATABASE_URL.
+  const backend = resolveDbBackend();
+  const existingAdapter = getActivePersistenceAdapterSync();
+
+  if (existingAdapter) {
+    if (existingAdapter.kind === "sqlite") {
+      assertProductionSafety(getDb());
+    } else {
+      assertProductionSafety(null, 0);
+    }
+  } else if (backend === "sqlite") {
+    const database = getDb();
+    assertProductionSafety(database);
+  } else {
+    // PostgreSQL mode: validate production env/secrets immediately and never touch SQLite!
+    assertProductionSafety(null, 0);
+  }
+
+  const server = createServer(async (req, res) => {
     if (!req || !res) return;
 
     let parsedUrl;
@@ -167,7 +193,7 @@ export function createAppServer() {
     const pathname =
       rawPathname.length > 1 ? rawPathname.replace(/\/+$/, "") : "/";
 
-    // Public health check (returns no sensitive state).
+    // Public liveness check (process alive; returns no sensitive state).
     if (pathname === "/health" && req.method === "GET") {
       sendJson(res, 200, {
         ok: true,
@@ -175,6 +201,38 @@ export function createAppServer() {
         version: "0.1.0",
         time: new Date().toISOString(),
       });
+      return;
+    }
+
+    // Operational readiness check (verifies active persistence backend connectivity & migrations).
+    if (pathname === "/readyz" && req.method === "GET") {
+      try {
+        const adapter = await getPersistenceAdapter();
+        const ping = await adapter.ping();
+        if (!ping.ok) {
+          sendError(res, 503, "not_ready", "Database readiness check returned not ok.", {
+            ready: false,
+            backend: adapter.kind,
+          });
+          return;
+        }
+        sendJson(res, 200, {
+          ok: true,
+          ready: true,
+          service: "contentvault",
+          backend: ping.backend,
+          ...(ping.dbRole ? { dbRole: ping.dbRole } : {}),
+          time: new Date().toISOString(),
+        });
+      } catch (error) {
+        sendError(
+          res,
+          503,
+          "not_ready",
+          error?.message ? String(error.message) : "Database backend unavailable.",
+          { ready: false },
+        );
+      }
       return;
     }
 
@@ -187,7 +245,7 @@ export function createAppServer() {
       rawPathname.includes("\0") ||
       rawPathname.includes("\\")
     ) {
-      audit({
+      await auditAsync({
         event: "storage.direct_probe",
         outcome: "deny",
         ip: clientIp(req),
@@ -204,7 +262,7 @@ export function createAppServer() {
       ["POST", "PUT", "PATCH", "DELETE"].includes(String(req.method))
     ) {
       if (!isSameOriginMutating(req)) {
-        audit({
+        await auditAsync({
           event: "security.csrf",
           outcome: "deny",
           ip: clientIp(req),
@@ -217,6 +275,21 @@ export function createAppServer() {
     }
 
     try {
+      // Ensure persistence backend is initialized before serving API / portfolio routes
+      if (pathname.startsWith("/api/") || pathname === "/portfolio" || pathname.startsWith("/portfolio/")) {
+        try {
+          await getPersistenceAdapter();
+        } catch (dbErr) {
+          sendError(
+            res,
+            503,
+            "database_unavailable",
+            dbErr?.message ? String(dbErr.message) : "Required database backend is unavailable.",
+          );
+          return;
+        }
+      }
+
       // Auth
       if (pathname === "/api/auth" || pathname.startsWith("/api/auth/")) {
         await handleAuth(req, res);
@@ -328,28 +401,26 @@ export function createAppServer() {
         return;
       }
 
-      // SEC-001: Protected M007 Portfolio Collaboration Enquiry endpoint (Admin / Reviewer only)
+      // SEC-001 & AUD-C5: Protected M007 Portfolio Collaboration Enquiry endpoint
+      // (Admin sees all; each Reviewer sees & creates ONLY their own enquiries!)
       if (pathname === "/api/portfolio/enquiries") {
         if (req.method !== "GET" && req.method !== "POST") {
           res.setHeader("Allow", "GET, POST");
           sendError(res, 405, "method_not_allowed", "Allowed methods: GET, POST.");
           return;
         }
-        const viewer = ensurePortfolioAccess(req, res, pathname);
+        const viewer = await ensurePortfolioAccessAsync(req, res, pathname);
         if (!viewer) return;
 
+        const adapter = await getPersistenceAdapter();
+
         if (req.method === "GET") {
-          const rows = getDb()
-            .prepare(
-              `SELECT id, created_at, actor_id, sender_name, sender_org, sender_email, topic, message
-               FROM portfolio_enquiries ORDER BY created_at DESC LIMIT 100`,
-            )
-            .all();
+          const rows = await adapter.listPortfolioEnquiries(viewer);
           sendJson(res, 200, { ok: true, enquiries: rows }, NOINDEX_HEADER);
           return;
         }
 
-        const limiter = rateLimit(`enquiry:${clientIp(req)}`, 10, 60);
+        const limiter = await rateLimitAsync(`enquiry:${clientIp(req)}`, 10, 60);
         if (!limiter.allowed) {
           sendError(res, 429, "rate_limited", "Too many enquiry submissions.");
           return;
@@ -376,21 +447,25 @@ export function createAppServer() {
           return;
         }
         const id = newId("enq");
-        getDb()
-          .prepare(
-            `INSERT INTO portfolio_enquiries
-              (id, created_at, actor_id, sender_name, sender_org, sender_email, topic, message)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          )
-          .run(id, nowIso(), viewer.id, senderName, senderOrg, senderEmail, topic, message);
-        audit({
-          event: "portfolio.enquiry",
-          outcome: "allow",
-          actorId: viewer.id,
-          actorRole: viewer.role,
-          ip: clientIp(req),
-          detail: { enquiryId: id, topic },
+        await adapter.createPortfolioEnquiry(viewer, {
+          id,
+          senderName,
+          senderOrg,
+          senderEmail,
+          topic,
+          message,
         });
+        await auditAsync(
+          {
+            event: "portfolio.enquiry",
+            outcome: "allow",
+            actorId: viewer.id,
+            actorRole: viewer.role,
+            ip: clientIp(req),
+            detail: { enquiryId: id, topic },
+          },
+          viewer,
+        );
         sendJson(
           res,
           201,
@@ -413,19 +488,22 @@ export function createAppServer() {
           sendError(res, 405, "method_not_allowed", "Allowed methods: GET, HEAD.");
           return;
         }
-        const viewer = ensurePortfolioAccess(req, res, pathname);
+        const viewer = await ensurePortfolioAccessAsync(req, res, pathname);
         if (!viewer) return;
 
         const sub = pathname.replace(/^\/portfolio\/?/, "") || "index.html";
         if (sub === "index.html") {
-          audit({
-            event: "portfolio.access",
-            outcome: "allow",
-            actorId: viewer.id,
-            actorRole: viewer.role,
-            ip: clientIp(req),
-            detail: { pathname },
-          });
+          await auditAsync(
+            {
+              event: "portfolio.access",
+              outcome: "allow",
+              actorId: viewer.id,
+              actorRole: viewer.role,
+              ip: clientIp(req),
+              detail: { pathname },
+            },
+            viewer,
+          );
         }
         const served = serveStaticFromRoot(PORTFOLIO_PUBLIC_DIR, sub, res, {
           "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0, private",
@@ -456,4 +534,11 @@ export function createAppServer() {
       );
     }
   });
+
+  return server;
+}
+
+export async function createAppServerAsync() {
+  await initializePersistence();
+  return createAppServer();
 }

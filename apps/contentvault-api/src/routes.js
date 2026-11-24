@@ -1,10 +1,10 @@
 /**
- * ContentVault HTTP routes.
+ * ContentVault HTTP routes (Mission 005 Phase A — Full Async Persistence).
  *
  * Core security principle: the client's only authenticated identity is the
- * server-side session (`cv_session` cookie), resolved in SQLite on every
- * request. No client field, query parameter, or custom identity header is
- * ever trusted as a user identity or role.
+ * server-side session (`cv_session` cookie), resolved in the active database
+ * backend (PostgreSQL 16 or SQLite) on every request. No client field, query
+ * parameter, or custom identity header is ever trusted as a user identity or role.
  */
 
 import fs from "node:fs";
@@ -21,44 +21,46 @@ import {
   serializeCookie,
   clearCookie,
   isSecureRequest,
-  rateLimit,
-  clearRateLimit,
+  rateLimitAsync,
+  clearRateLimitAsync,
   clientIp,
   protectedAssetHeaders,
 } from "./http/helpers.js";
 import {
   SESSION_COOKIE,
   VALID_ROLES,
-  createUser,
-  findUserById,
-  findUserByEmail,
-  listUsers,
-  login,
-  createSessionForUser,
-  logout,
+  createUserAsync,
+  findUserByIdAsync,
+  findUserByEmailAsync,
+  listUsersAsync,
+  loginAsync,
+  createSessionForUserAsync,
+  logoutAsync,
   resolveSession,
+  resolveSessionAsync,
   canViewPortfolio,
-  canReadDocument,
+  canReadDocumentAsync,
   issuePageToken,
-  redeemPageToken,
+  redeemPageTokenAsync,
   issueAudioToken,
   verifyAudioToken,
 } from "./security/authz.js";
 import {
-  grantEntitlement,
-  revokeEntitlement,
-  findDocument,
-  listReadableDocuments,
+  grantEntitlementAsync,
+  revokeEntitlementAsync,
+  findDocumentAsync,
+  listReadableDocumentsAsync,
   listDocuments,
-  createDocument,
-  addChapter,
-  listChapters,
-  findChapterForPage,
-  findChapterById,
-  attachChapterAudio,
-  recordProgress,
-  getProgress,
-  listEntitlementsForDocument,
+  listDocumentsAsync,
+  createDocumentAsync,
+  addChapterAsync,
+  listChaptersAsync,
+  findChapterForPageAsync,
+  findChapterByIdAsync,
+  attachChapterAudioAsync,
+  recordProgressAsync,
+  getProgressAsync,
+  listEntitlementsForDocumentAsync,
 } from "./services/content.js";
 import {
   probePdf,
@@ -71,8 +73,12 @@ import {
   privateObjectExists,
   keyToPath,
 } from "./services/storage.js";
-import { audit, listAudit } from "./security/audit.js";
-import { getDb, nowIso } from "./db.js";
+import { auditAsync, listAuditAsync } from "./security/audit.js";
+import { nowIso } from "./db.js";
+import {
+  getPersistenceAdapter,
+  getActivePersistenceAdapterSync,
+} from "./persistence/adapter.js";
 import {
   PAGE_TOKEN_TTL_SECONDS,
   AUDIO_TOKEN_TTL_SECONDS,
@@ -95,7 +101,7 @@ import {
  */
 let demoDocId = null;
 
-export function requireDemoDocId() {
+function readCachedDemoDocId() {
   if (demoDocId) return demoDocId;
   if (process.env.CV_DEMO_DOCUMENT_ID) return process.env.CV_DEMO_DOCUMENT_ID;
   try {
@@ -109,8 +115,25 @@ export function requireDemoDocId() {
   } catch {
     /* ignore unreadable manifest */
   }
-  const docs = listDocuments();
+  return null;
+}
+
+export async function requireDemoDocIdAsync() {
+  const cached = readCachedDemoDocId();
+  if (cached) return cached;
+  const docs = await listDocumentsAsync({ role: "admin" });
   return docs.length > 0 ? docs[0].id : null;
+}
+
+export function requireDemoDocId() {
+  const cached = readCachedDemoDocId();
+  if (cached) return cached;
+  const syncAdapter = getActivePersistenceAdapterSync();
+  if (syncAdapter && syncAdapter.kind === "sqlite") {
+    const docs = listDocuments();
+    return docs.length > 0 ? docs[0].id : null;
+  }
+  return null;
 }
 
 export function setDemoDocId(id) {
@@ -150,11 +173,7 @@ function safeDocument(doc) {
   return publicFields;
 }
 
-/**
- * Resolve the authenticated user from the server-side session.
- * Returns null if there is no valid session.
- */
-export function currentUser(req) {
+function extractSessionCookie(req) {
   const cookies = parseCookies(req);
   let sessionId = cookies[SESSION_COOKIE];
   if (!sessionId && isFrameEmbedAllowed()) {
@@ -163,6 +182,20 @@ export function currentUser(req) {
       sessionId = fallback.trim();
     }
   }
+  return sessionId || null;
+}
+
+/**
+ * Resolve the authenticated user from the active server-side persistence backend.
+ */
+export async function currentUserAsync(req) {
+  const sessionId = extractSessionCookie(req);
+  if (!sessionId) return null;
+  return resolveSessionAsync(sessionId);
+}
+
+export function currentUser(req) {
+  const sessionId = extractSessionCookie(req);
   if (!sessionId) return null;
   return resolveSession(sessionId);
 }
@@ -177,10 +210,10 @@ export function requireAdmin(req) {
   return user.role === "admin" ? user : null;
 }
 
-function ensureAdmin(req, res, eventName) {
-  const user = currentUser(req);
+async function ensureAdminAsync(req, res, eventName) {
+  const user = await currentUserAsync(req);
   if (!user) {
-    audit({
+    await auditAsync({
       event: eventName,
       outcome: "deny",
       ip: extractIp(req),
@@ -191,15 +224,18 @@ function ensureAdmin(req, res, eventName) {
     return null;
   }
   if (user.role !== "admin") {
-    audit({
-      event: eventName,
-      outcome: "deny",
-      actorId: user.id,
-      actorRole: user.role,
-      ip: extractIp(req),
-      userAgent: userAgent(req),
-      detail: { reason: "admin_required" },
-    });
+    await auditAsync(
+      {
+        event: eventName,
+        outcome: "deny",
+        actorId: user.id,
+        actorRole: user.role,
+        ip: extractIp(req),
+        userAgent: userAgent(req),
+        detail: { reason: "admin_required" },
+      },
+      user,
+    );
     sendError(res, 403, "admin_required", "Administrator privileges are required.");
     return null;
   }
@@ -217,7 +253,7 @@ function methodNotAllowed(res, allowed) {
 
 function writeTempBuffer(buffer, subdir, ext = "pdf") {
   const tmpDir = path.join(os.tmpdir(), subdir);
-  fs.mkdirSync(tmpDir, { recursive: true });
+  fs.mkdirSync(tmpDir, { recursive: true, mode: 0o700 });
   const file = path.join(tmpDir, `${crypto.randomBytes(12).toString("hex")}.${ext}`);
   fs.writeFileSync(file, buffer, { mode: 0o600 });
   return file;
@@ -289,7 +325,7 @@ function issueSessionResponse(req, res, session) {
   return sendJson(res, 200, responsePayload);
 }
 
-function handleDemoPersonas(_req, res) {
+async function handleDemoPersonas(_req, res) {
   if (!isDemoPersonasEnabled()) {
     return sendError(
       res,
@@ -299,7 +335,7 @@ function handleDemoPersonas(_req, res) {
       { enabled: false, personas: [] },
     );
   }
-  const demoDocIdValue = requireDemoDocId();
+  const demoDocIdValue = await requireDemoDocIdAsync();
 
   // SEC-002: Never include passwords or secrets in API responses.
   return sendJson(res, 200, {
@@ -345,7 +381,7 @@ function handleDemoPersonas(_req, res) {
 
 async function handleDemoLogin(req, res) {
   if (!isDemoPersonasEnabled()) {
-    audit({
+    await auditAsync({
       event: "auth.demo_login",
       outcome: "deny",
       ip: extractIp(req),
@@ -361,7 +397,7 @@ async function handleDemoLogin(req, res) {
   }
 
   const meta = { ip: extractIp(req), userAgent: userAgent(req) };
-  const limiter = rateLimit(`demologin:ip:${meta.ip}`, LOGIN_IP_LIMIT_PER_MINUTE, 60);
+  const limiter = await rateLimitAsync(`demologin:ip:${meta.ip}`, LOGIN_IP_LIMIT_PER_MINUTE, 60);
   if (!limiter.allowed) {
     res.setHeader("Retry-After", String(limiter.retryAfter || 60));
     return sendError(res, 429, "rate_limited", "Too many login attempts.");
@@ -380,12 +416,12 @@ async function handleDemoLogin(req, res) {
     return sendError(res, 400, "bad_request", "Unknown demo persona identifier.");
   }
 
-  const user = findUserByEmail(targetEmail);
+  const user = await findUserByEmailAsync({ role: "admin" }, targetEmail);
   if (!user || user.disabled_at || Number(user.is_demo) !== 1) {
     return sendError(res, 404, "demo_account_unavailable", "Seeded demo persona not found.");
   }
 
-  const session = createSessionForUser(user, {
+  const session = await createSessionForUserAsync(user, {
     ...meta,
     eventDetail: { mode: "demo_persona_switch", personaId },
   });
@@ -394,9 +430,14 @@ async function handleDemoLogin(req, res) {
 
 async function handleLogin(req, res) {
   const meta = { ip: extractIp(req), userAgent: userAgent(req) };
-  const limiter = rateLimit(`login:ip:${meta.ip}`, LOGIN_IP_LIMIT_PER_MINUTE, 60);
+  const limiter = await rateLimitAsync(
+    `login:ip:${meta.ip}`,
+    LOGIN_IP_LIMIT_PER_MINUTE,
+    60,
+    { protectLockout: true },
+  );
   if (!limiter.allowed) {
-    audit({
+    await auditAsync({
       event: "auth.login",
       outcome: "deny",
       ip: meta.ip,
@@ -427,14 +468,14 @@ async function handleLogin(req, res) {
 
   // 1. Per-(IP, Account) pair throttle blocks single-source brute force without
   //    locking out the legitimate account owner signing in from a clean network.
-  const pairStatus = rateLimit(
+  const pairStatus = await rateLimitAsync(
     pairKey,
     LOGIN_PAIR_FAIL_LIMIT,
     LOGIN_ACCOUNT_WINDOW_SECONDS,
-    { increment: false },
+    { increment: false, protectLockout: true },
   );
   if (!pairStatus.allowed) {
-    audit({
+    await auditAsync({
       event: "auth.login",
       outcome: "deny",
       ip: meta.ip,
@@ -451,15 +492,15 @@ async function handleLogin(req, res) {
     );
   }
 
-  // 2. Hard global scrypt CPU ceiling per account protects worker CPU against huge botnets.
-  const cpuStatus = rateLimit(
+  // 2. Hard global scrypt CPU ceiling per account (upgraded further in Checkpoint 005-C).
+  const cpuStatus = await rateLimitAsync(
     cpuKey,
     LOGIN_GLOBAL_CPU_CEILING,
     LOGIN_ACCOUNT_WINDOW_SECONDS,
     { increment: true },
   );
   if (!cpuStatus.allowed) {
-    audit({
+    await auditAsync({
       event: "auth.login",
       outcome: "deny",
       ip: meta.ip,
@@ -477,19 +518,14 @@ async function handleLogin(req, res) {
   }
 
   // 3. Distributed account velocity check:
-  //    - If global failed attempts exceed LOGIN_ACCOUNT_FAIL_LIMIT AND this IP already
-  //      failed at least once (`pairStatus.count > 0`), reject immediately with 429.
-  //    - If this IP has zero prior failures (`pairStatus.count === 0`), verify password
-  //      so the legitimate user is NOT DoS-locked out by third-party spray attacks,
-  //      while returning 429 immediately if the password from the new IP is also wrong!
-  const acctStatus = rateLimit(
+  const acctStatus = await rateLimitAsync(
     acctKey,
     LOGIN_ACCOUNT_FAIL_LIMIT,
     LOGIN_ACCOUNT_WINDOW_SECONDS,
-    { increment: false },
+    { increment: false, protectLockout: true },
   );
   if (!acctStatus.allowed && pairStatus.count > 0) {
-    audit({
+    await auditAsync({
       event: "auth.login",
       outcome: "deny",
       ip: meta.ip,
@@ -508,9 +544,9 @@ async function handleLogin(req, res) {
 
   let session;
   try {
-    session = login({ email: body.email, password: body.password, ...meta });
+    session = await loginAsync({ email: body.email, password: body.password, ...meta });
   } catch (error) {
-    audit({
+    await auditAsync({
       event: "auth.login",
       outcome: "error",
       ip: meta.ip,
@@ -521,17 +557,18 @@ async function handleLogin(req, res) {
   }
 
   if (!session) {
-    rateLimit(pairKey, LOGIN_PAIR_FAIL_LIMIT, LOGIN_ACCOUNT_WINDOW_SECONDS, {
+    await rateLimitAsync(pairKey, LOGIN_PAIR_FAIL_LIMIT, LOGIN_ACCOUNT_WINDOW_SECONDS, {
       increment: true,
+      protectLockout: true,
     });
-    const updatedAcct = rateLimit(
+    const updatedAcct = await rateLimitAsync(
       acctKey,
       LOGIN_ACCOUNT_FAIL_LIMIT,
       LOGIN_ACCOUNT_WINDOW_SECONDS,
-      { increment: true },
+      { increment: true, protectLockout: true },
     );
-    if (!acctStatus.allowed || !updatedAcct.allowed && updatedAcct.count > LOGIN_ACCOUNT_FAIL_LIMIT) {
-      audit({
+    if (!acctStatus.allowed || (!updatedAcct.allowed && updatedAcct.count > LOGIN_ACCOUNT_FAIL_LIMIT)) {
+      await auditAsync({
         event: "auth.login",
         outcome: "deny",
         ip: meta.ip,
@@ -553,29 +590,22 @@ async function handleLogin(req, res) {
     return sendError(res, 401, "invalid_credentials", "Email or password is incorrect.");
   }
 
-  // Clear ONLY this legitimate caller's (IP, Account) pair counter — never clear
-  // global/other-IP lockout counters so an active distributed attacker stays throttled.
-  clearRateLimit(pairKey);
+  await clearRateLimitAsync(pairKey);
   return issueSessionResponse(req, res, session);
 }
 
 async function handleLogout(req, res) {
   const meta = { ip: extractIp(req), userAgent: userAgent(req) };
-  const cookies = parseCookies(req);
-  const sid =
-    cookies[SESSION_COOKIE] ||
-    (isFrameEmbedAllowed()
-      ? String(req.headers["x-cv-session"] || "").trim()
-      : "");
+  const sid = extractSessionCookie(req);
   if (sid) {
-    logout(sid, meta);
+    await logoutAsync(sid, meta);
   }
   res.setHeader("Set-Cookie", clearCookie(SESSION_COOKIE));
   return sendJson(res, 200, { ok: true });
 }
 
 async function handleMe(req, res) {
-  const user = currentUser(req);
+  const user = await currentUserAsync(req);
   if (!user) {
     return sendError(res, 401, "not_authenticated", "No valid session.");
   }
@@ -583,7 +613,7 @@ async function handleMe(req, res) {
 }
 
 async function handleRegister(req, res) {
-  const admin = ensureAdmin(req, res, "admin.user.register");
+  const admin = await ensureAdminAsync(req, res, "admin.user.register");
   if (!admin) return;
 
   let body;
@@ -606,34 +636,40 @@ async function handleRegister(req, res) {
     );
   }
   try {
-    const created = createUser({
+    const created = await createUserAsync(admin, {
       email: body.email,
       password: body.password,
       displayName: body.displayName,
       role: body.role,
       locale: body.locale === "zh" ? "zh" : "en",
     });
-    audit({
-      event: "admin.user.register",
-      outcome: "allow",
-      actorId: admin.id,
-      actorRole: "admin",
-      subjectId: created.id,
-      ip: extractIp(req),
-      userAgent: userAgent(req),
-      detail: { email: created.email, role: created.role },
-    });
+    await auditAsync(
+      {
+        event: "admin.user.register",
+        outcome: "allow",
+        actorId: admin.id,
+        actorRole: "admin",
+        subjectId: created.id,
+        ip: extractIp(req),
+        userAgent: userAgent(req),
+        detail: { email: created.email, role: created.role },
+      },
+      admin,
+    );
     return sendJson(res, 201, { ok: true, user: created });
   } catch (error) {
-    audit({
-      event: "admin.user.register",
-      outcome: "deny",
-      actorId: admin.id,
-      actorRole: "admin",
-      ip: extractIp(req),
-      userAgent: userAgent(req),
-      detail: { error: error.message },
-    });
+    await auditAsync(
+      {
+        event: "admin.user.register",
+        outcome: "deny",
+        actorId: admin.id,
+        actorRole: "admin",
+        ip: extractIp(req),
+        userAgent: userAgent(req),
+        detail: { error: error.message },
+      },
+      admin,
+    );
     return sendError(res, 400, "registration_error", error.message);
   }
 }
@@ -653,17 +689,19 @@ async function handleDocuments(req, res) {
 }
 
 async function handleListDocuments(req, res) {
-  const user = currentUser(req);
+  const user = await currentUserAsync(req);
   if (!user) {
     return sendError(res, 401, "not_authenticated", "No valid session.");
   }
   const documents =
-    user.role === "admin" ? listDocuments() : listReadableDocuments(user);
+    user.role === "admin"
+      ? await listDocumentsAsync(user)
+      : await listReadableDocumentsAsync(user);
   return sendJson(res, 200, { ok: true, documents });
 }
 
 async function handleUploadDocument(req, res) {
-  const admin = ensureAdmin(req, res, "document.upload");
+  const admin = await ensureAdminAsync(req, res, "document.upload");
   if (!admin) return;
 
   let body;
@@ -688,15 +726,18 @@ async function handleUploadDocument(req, res) {
     return sendError(res, 400, "bad_request", "Content-Type must be application/pdf.");
   }
   if (body.length < 8 || body.subarray(0, 5).toString("ascii") !== "%PDF-") {
-    audit({
-      event: "document.upload",
-      outcome: "deny",
-      actorId: admin.id,
-      actorRole: "admin",
-      ip: extractIp(req),
-      userAgent: userAgent(req),
-      detail: { reason: "not_a_pdf_header" },
-    });
+    await auditAsync(
+      {
+        event: "document.upload",
+        outcome: "deny",
+        actorId: admin.id,
+        actorRole: "admin",
+        ip: extractIp(req),
+        userAgent: userAgent(req),
+        detail: { reason: "not_a_pdf_header" },
+      },
+      admin,
+    );
     return sendError(res, 400, "invalid_pdf", "Payload does not have a valid %PDF- header.");
   }
 
@@ -705,15 +746,18 @@ async function handleUploadDocument(req, res) {
   try {
     probe = await probePdf(stagedFile);
   } catch (error) {
-    audit({
-      event: "document.upload",
-      outcome: "deny",
-      actorId: admin.id,
-      actorRole: "admin",
-      ip: extractIp(req),
-      userAgent: userAgent(req),
-      detail: { error: error.message },
-    });
+    await auditAsync(
+      {
+        event: "document.upload",
+        outcome: "deny",
+        actorId: admin.id,
+        actorRole: "admin",
+        ip: extractIp(req),
+        userAgent: userAgent(req),
+        detail: { error: error.message },
+      },
+      admin,
+    );
     return sendError(res, 400, "invalid_pdf", error.message);
   } finally {
     try {
@@ -734,7 +778,7 @@ async function handleUploadDocument(req, res) {
 
   try {
     const storage = await putPrivateObject(body, "pdf");
-    const document = createDocument({
+    const document = await createDocumentAsync(admin, {
       titleEn,
       titleZh,
       author,
@@ -748,7 +792,7 @@ async function handleUploadDocument(req, res) {
     });
 
     if (autoChapter) {
-      addChapter({
+      await addChapterAsync(admin, {
         documentId: document.id,
         ordinal: 1,
         titleEn: "Complete Module",
@@ -758,31 +802,37 @@ async function handleUploadDocument(req, res) {
       });
     }
 
-    audit({
-      event: "document.upload",
-      outcome: "allow",
-      actorId: admin.id,
-      actorRole: "admin",
-      documentId: document.id,
-      ip: extractIp(req),
-      userAgent: userAgent(req),
-      detail: {
-        titleEn,
-        pageCount: probe.pageCount,
-        byteSize: storage.byteSize,
+    await auditAsync(
+      {
+        event: "document.upload",
+        outcome: "allow",
+        actorId: admin.id,
+        actorRole: "admin",
+        documentId: document.id,
+        ip: extractIp(req),
+        userAgent: userAgent(req),
+        detail: {
+          titleEn,
+          pageCount: probe.pageCount,
+          byteSize: storage.byteSize,
+        },
       },
-    });
+      admin,
+    );
     return sendJson(res, 201, { ok: true, document: safeDocument(document) });
   } catch (error) {
-    audit({
-      event: "document.upload",
-      outcome: "error",
-      actorId: admin.id,
-      actorRole: "admin",
-      ip: extractIp(req),
-      userAgent: userAgent(req),
-      detail: { error: error.message },
-    });
+    await auditAsync(
+      {
+        event: "document.upload",
+        outcome: "error",
+        actorId: admin.id,
+        actorRole: "admin",
+        ip: extractIp(req),
+        userAgent: userAgent(req),
+        detail: { error: error.message },
+      },
+      admin,
+    );
     return sendError(res, 500, "upload_error", error.message);
   }
 }
@@ -792,9 +842,9 @@ async function handleUploadDocument(req, res) {
 /* ------------------------------------------------------------------ */
 
 async function handleDocumentDetail(req, res, id) {
-  const user = currentUser(req);
+  const user = await currentUserAsync(req);
   if (!user) {
-    audit({
+    await auditAsync({
       event: "document.open",
       outcome: "deny",
       documentId: id,
@@ -805,10 +855,10 @@ async function handleDocumentDetail(req, res, id) {
     return sendError(res, 401, "not_authenticated", "No valid session.");
   }
 
-  const document = findDocument(id);
-  if (!document || document.archived_at) {
-    if (user.role !== "admin") {
-      audit({
+  const verdict = await canReadDocumentAsync(user, id);
+  if (user.role !== "admin" && !verdict.allowed) {
+    await auditAsync(
+      {
         event: "document.open",
         outcome: "deny",
         actorId: user.id,
@@ -816,42 +866,51 @@ async function handleDocumentDetail(req, res, id) {
         documentId: id,
         ip: extractIp(req),
         userAgent: userAgent(req),
-        detail: { reason: "not_found_or_unauthorized" },
-      });
+        detail: { reason: verdict.reason },
+      },
+      user,
+    );
+    return sendError(res, 403, verdict.reason, `Access denied: ${verdict.reason}.`);
+  }
+
+  const document = await findDocumentAsync(user, id);
+  if (!document || document.archived_at) {
+    if (user.role !== "admin") {
+      await auditAsync(
+        {
+          event: "document.open",
+          outcome: "deny",
+          actorId: user.id,
+          actorRole: user.role,
+          documentId: id,
+          ip: extractIp(req),
+          userAgent: userAgent(req),
+          detail: { reason: "not_found_or_unauthorized" },
+        },
+        user,
+      );
       return sendError(res, 403, "no_entitlement", "Access denied.");
     }
     return sendError(res, 404, "not_found", "Document not found.");
   }
 
-  const verdict = canReadDocument(user, id);
-  if (user.role !== "admin" && !verdict.allowed) {
-    audit({
+  const chapters = await listChaptersAsync(user, id);
+  const entitlements =
+    user.role === "admin" ? await listEntitlementsForDocumentAsync(user, id) : null;
+  const progress = await getProgressAsync(user, user.id, id);
+
+  await auditAsync(
+    {
       event: "document.open",
-      outcome: "deny",
+      outcome: "allow",
       actorId: user.id,
       actorRole: user.role,
       documentId: id,
       ip: extractIp(req),
       userAgent: userAgent(req),
-      detail: { reason: verdict.reason },
-    });
-    return sendError(res, 403, verdict.reason, `Access denied: ${verdict.reason}.`);
-  }
-
-  const chapters = listChapters(id);
-  const entitlements =
-    user.role === "admin" ? listEntitlementsForDocument(id) : null;
-  const progress = getProgress(user.id, id);
-
-  audit({
-    event: "document.open",
-    outcome: "allow",
-    actorId: user.id,
-    actorRole: user.role,
-    documentId: id,
-    ip: extractIp(req),
-    userAgent: userAgent(req),
-  });
+    },
+    user,
+  );
 
   return sendJson(res, 200, {
     ok: true,
@@ -872,7 +931,7 @@ async function handleDocumentDetail(req, res, id) {
 }
 
 async function handleGrantAccess(req, res, documentId) {
-  const admin = ensureAdmin(req, res, "entitlement.grant");
+  const admin = await ensureAdminAsync(req, res, "entitlement.grant");
   if (!admin) return;
 
   let body;
@@ -883,13 +942,13 @@ async function handleGrantAccess(req, res, documentId) {
   }
 
   const targetUser = body.userId
-    ? findUserById(String(body.userId))
-    : findUserByEmail(body.email);
+    ? await findUserByIdAsync(admin, String(body.userId))
+    : await findUserByEmailAsync(admin, body.email);
 
   if (!targetUser || targetUser.role !== "student") {
     return sendError(res, 404, "student_not_found", "Student account not found.");
   }
-  const document = findDocument(documentId);
+  const document = await findDocumentAsync(admin, documentId);
   if (!document) {
     return sendError(res, 404, "not_found", "Document not found.");
   }
@@ -904,7 +963,7 @@ async function handleGrantAccess(req, res, documentId) {
   }
 
   try {
-    const result = grantEntitlement({
+    const result = await grantEntitlementAsync(admin, {
       userId: targetUser.id,
       documentId,
       grantedBy: admin.id,
@@ -917,23 +976,26 @@ async function handleGrantAccess(req, res, documentId) {
       changed: result.changed,
     });
   } catch (error) {
-    audit({
-      event: "entitlement.grant",
-      outcome: "deny",
-      actorId: admin.id,
-      actorRole: "admin",
-      subjectId: targetUser.id,
-      documentId,
-      ip: extractIp(req),
-      userAgent: userAgent(req),
-      detail: { error: error.message },
-    });
+    await auditAsync(
+      {
+        event: "entitlement.grant",
+        outcome: "deny",
+        actorId: admin.id,
+        actorRole: "admin",
+        subjectId: targetUser.id,
+        documentId,
+        ip: extractIp(req),
+        userAgent: userAgent(req),
+        detail: { error: error.message },
+      },
+      admin,
+    );
     return sendError(res, 500, "grant_error", error.message);
   }
 }
 
 async function handleRevokeAccess(req, res, documentId) {
-  const admin = ensureAdmin(req, res, "entitlement.revoke");
+  const admin = await ensureAdminAsync(req, res, "entitlement.revoke");
   if (!admin) return;
 
   let body;
@@ -944,14 +1006,14 @@ async function handleRevokeAccess(req, res, documentId) {
   }
 
   const targetUser = body.userId
-    ? findUserById(String(body.userId))
-    : findUserByEmail(body.email);
+    ? await findUserByIdAsync(admin, String(body.userId))
+    : await findUserByEmailAsync(admin, body.email);
 
   if (!targetUser) {
     return sendError(res, 404, "student_not_found", "Student account not found.");
   }
 
-  const result = revokeEntitlement({
+  const result = await revokeEntitlementAsync(admin, {
     userId: targetUser.id,
     documentId,
     revokedBy: admin.id,
@@ -972,24 +1034,27 @@ async function handleRevokeAccess(req, res, documentId) {
 
 async function handleChapters(req, res, documentId) {
   if (req.method === "GET") {
-    const user = currentUser(req);
+    const user = await currentUserAsync(req);
     if (!user) {
       return sendError(res, 401, "not_authenticated", "No valid session.");
     }
     if (user.role !== "admin") {
-      const verdict = canReadDocument(user, documentId);
+      const verdict = await canReadDocumentAsync(user, documentId);
       if (!verdict.allowed) {
         return sendError(res, 403, verdict.reason, `Access denied: ${verdict.reason}.`);
       }
     }
-    return sendJson(res, 200, { ok: true, chapters: listChapters(documentId) });
+    return sendJson(res, 200, {
+      ok: true,
+      chapters: await listChaptersAsync(user, documentId),
+    });
   }
 
   if (req.method === "POST") {
-    const admin = ensureAdmin(req, res, "chapter.create");
+    const admin = await ensureAdminAsync(req, res, "chapter.create");
     if (!admin) return;
 
-    const document = findDocument(documentId);
+    const document = await findDocumentAsync(admin, documentId);
     if (!document) {
       return sendError(res, 404, "not_found", "Document not found.");
     }
@@ -1002,7 +1067,7 @@ async function handleChapters(req, res, documentId) {
     }
     const startPage = Math.max(1, Number(body.startPage || 1));
     const endPage = Math.min(document.page_count, Math.max(startPage, Number(body.endPage || startPage)));
-    const chapterId = addChapter({
+    const chapterId = await addChapterAsync(admin, {
       documentId,
       ordinal: Number(body.ordinal || 1),
       titleEn: String(body.titleEn || "Untitled chapter").trim(),
@@ -1013,16 +1078,19 @@ async function handleChapters(req, res, documentId) {
       audioMime: body.audioMime ?? null,
       audioSeconds: body.audioSeconds ?? null,
     });
-    audit({
-      event: "chapter.create",
-      outcome: "allow",
-      actorId: admin.id,
-      actorRole: "admin",
-      documentId,
-      ip: extractIp(req),
-      userAgent: userAgent(req),
-      detail: { chapterId, startPage, endPage },
-    });
+    await auditAsync(
+      {
+        event: "chapter.create",
+        outcome: "allow",
+        actorId: admin.id,
+        actorRole: "admin",
+        documentId,
+        ip: extractIp(req),
+        userAgent: userAgent(req),
+        detail: { chapterId, startPage, endPage },
+      },
+      admin,
+    );
     return sendJson(res, 201, { ok: true, chapterId });
   }
 
@@ -1033,10 +1101,10 @@ async function handleUploadChapterAudio(req, res, documentId, chapterId) {
   if (req.method !== "POST") {
     return methodNotAllowed(res, "POST");
   }
-  const admin = ensureAdmin(req, res, "chapter.audio.upload");
+  const admin = await ensureAdminAsync(req, res, "chapter.audio.upload");
   if (!admin) return;
 
-  const chapter = findChapterById(documentId, chapterId);
+  const chapter = await findChapterByIdAsync(admin, documentId, chapterId);
   if (!chapter) {
     return sendError(res, 404, "not_found", "Chapter not found.");
   }
@@ -1072,7 +1140,7 @@ async function handleUploadChapterAudio(req, res, documentId, chapterId) {
   const audioSeconds = Number(req.headers["x-audio-seconds"] || 0) || null;
 
   const stored = await putPrivateObject(body, ext);
-  attachChapterAudio({
+  await attachChapterAudioAsync(admin, {
     documentId,
     chapterId,
     audioKey: stored.key,
@@ -1080,16 +1148,19 @@ async function handleUploadChapterAudio(req, res, documentId, chapterId) {
     audioSeconds,
   });
 
-  audit({
-    event: "chapter.audio.upload",
-    outcome: "allow",
-    actorId: admin.id,
-    actorRole: "admin",
-    documentId,
-    ip: extractIp(req),
-    userAgent: userAgent(req),
-    detail: { chapterId, byteSize: stored.byteSize, mime: canonicalMime },
-  });
+  await auditAsync(
+    {
+      event: "chapter.audio.upload",
+      outcome: "allow",
+      actorId: admin.id,
+      actorRole: "admin",
+      documentId,
+      ip: extractIp(req),
+      userAgent: userAgent(req),
+      detail: { chapterId, byteSize: stored.byteSize, mime: canonicalMime },
+    },
+    admin,
+  );
 
   return sendJson(res, 201, {
     ok: true,
@@ -1108,9 +1179,9 @@ async function handlePage(req, res, documentId) {
     return methodNotAllowed(res, "GET");
   }
 
-  const user = currentUser(req);
+  const user = await currentUserAsync(req);
   if (!user) {
-    audit({
+    await auditAsync({
       event: "page.render",
       outcome: "deny",
       actorId: null,
@@ -1123,22 +1194,25 @@ async function handlePage(req, res, documentId) {
     return sendError(res, 401, "not_authenticated", "No valid session.");
   }
 
-  const verdict = canReadDocument(user, documentId);
+  const verdict = await canReadDocumentAsync(user, documentId);
   if (!verdict.allowed) {
-    audit({
-      event: "page.render",
-      outcome: "deny",
-      actorId: user.id,
-      actorRole: user.role,
-      documentId,
-      ip: extractIp(req),
-      userAgent: userAgent(req),
-      detail: { reason: verdict.reason },
-    });
+    await auditAsync(
+      {
+        event: "page.render",
+        outcome: "deny",
+        actorId: user.id,
+        actorRole: user.role,
+        documentId,
+        ip: extractIp(req),
+        userAgent: userAgent(req),
+        detail: { reason: verdict.reason },
+      },
+      user,
+    );
     return sendError(res, 403, verdict.reason, `Access denied: ${verdict.reason}.`);
   }
 
-  const document = findDocument(documentId);
+  const document = await findDocumentAsync(user, documentId);
   if (!document || document.archived_at) {
     return sendError(res, 404, "not_found", "Document not found.");
   }
@@ -1157,19 +1231,42 @@ async function handlePage(req, res, documentId) {
 
   const entitlement = verdict.entitlement;
 
-  // SEC-005: When a signed page token is supplied, verify signature, purpose,
-  // expiry, subject identity, document, page, current entitlement version, AND
-  // atomically redeem its jti so each X-Page-Token is strictly single-use.
+  // SEC-005: Verify signature, purpose, expiry, subject, document, page, entitlement version,
+  // AND atomically redeem its jti in the active logged database ledger (`token_redemptions`).
   if (query.token !== undefined) {
     try {
-      const claims = redeemPageToken(query.token);
+      const claims = await redeemPageTokenAsync(query.token);
       if (
         claims.sub !== user.id ||
         claims.doc !== documentId ||
         Number(claims.page) !== page ||
         Number(claims.ent) !== Number(entitlement.version)
       ) {
-        audit({
+        await auditAsync(
+          {
+            event: "page.render",
+            outcome: "deny",
+            actorId: user.id,
+            actorRole: user.role,
+            documentId,
+            page,
+            ip: extractIp(req),
+            userAgent: userAgent(req),
+            detail: { reason: "page_token_claim_mismatch" },
+          },
+          user,
+        );
+        return sendError(
+          res,
+          403,
+          "invalid_page_token",
+          "Page token does not match current session or entitlement.",
+        );
+      }
+    } catch (error) {
+      const errCode = error.code === "token_replayed" ? "token_replayed" : "invalid_page_token";
+      await auditAsync(
+        {
           event: "page.render",
           outcome: "deny",
           actorId: user.id,
@@ -1178,28 +1275,15 @@ async function handlePage(req, res, documentId) {
           page,
           ip: extractIp(req),
           userAgent: userAgent(req),
-          detail: { reason: "page_token_claim_mismatch" },
-        });
-        return sendError(res, 403, "invalid_page_token", "Page token does not match current session or entitlement.");
-      }
-    } catch (error) {
-      const errCode = error.code === "token_replayed" ? "token_replayed" : "invalid_page_token";
-      audit({
-        event: "page.render",
-        outcome: "deny",
-        actorId: user.id,
-        actorRole: user.role,
-        documentId,
-        page,
-        ip: extractIp(req),
-        userAgent: userAgent(req),
-        detail: { reason: error.code || "invalid_page_token" },
-      });
+          detail: { reason: error.code || "invalid_page_token" },
+        },
+        user,
+      );
       return sendError(res, 403, errCode, error.message);
     }
   }
 
-  const limiter = rateLimit(`page:${user.id}`, 180, 60);
+  const limiter = await rateLimitAsync(`page:${user.id}`, 180, 60);
   if (!limiter.allowed) {
     res.setHeader("Retry-After", String(limiter.retryAfter || 60));
     return sendError(res, 429, "rate_limited", "Too many page requests.");
@@ -1215,7 +1299,7 @@ async function handlePage(req, res, documentId) {
     Date.now() + PAGE_TOKEN_TTL_SECONDS * 1000,
   ).toISOString();
 
-  const chapter = findChapterForPage(documentId, page);
+  const chapter = await findChapterForPageAsync(user, documentId, page);
   const audioToken =
     chapter && chapter.audio_key
       ? issueAudioToken(user, documentId, page, entitlement.version, chapter.id)
@@ -1223,12 +1307,12 @@ async function handlePage(req, res, documentId) {
 
   try {
     // Identity ALWAYS comes from the server-side authenticated user row.
-    // Client-supplied headers/query fields (userId, watermark, etc.) are ignored.
     const stamp = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
     const result = await renderWatermarkedPage({
       absolutePath: absolutePdfPath,
       page,
       contentHash: document.content_hash,
+      userId: user.id,
       identity: {
         label: user.display_name,
         ref: user.id,
@@ -1236,28 +1320,31 @@ async function handlePage(req, res, documentId) {
       },
     });
 
-    recordProgress({
+    await recordProgressAsync(user, {
       userId: user.id,
       documentId,
       page,
       pageCount: document.page_count,
     });
 
-    audit({
-      event: "page.render",
-      outcome: "allow",
-      actorId: user.id,
-      actorRole: user.role,
-      documentId,
-      page,
-      ip: extractIp(req),
-      userAgent: userAgent(req),
-      detail: {
-        sha256: result.sha256,
-        renderMs: result.renderMs,
-        cacheHit: result.cacheHit,
+    await auditAsync(
+      {
+        event: "page.render",
+        outcome: "allow",
+        actorId: user.id,
+        actorRole: user.role,
+        documentId,
+        page,
+        ip: extractIp(req),
+        userAgent: userAgent(req),
+        detail: {
+          sha256: result.sha256,
+          renderMs: result.renderMs,
+          cacheHit: result.cacheHit,
+        },
       },
-    });
+      user,
+    );
 
     const extraHeaders = {
       ...protectedAssetHeaders(),
@@ -1276,18 +1363,26 @@ async function handlePage(req, res, documentId) {
 
     return sendBuffer(res, 200, result.buffer, "image/png", extraHeaders);
   } catch (error) {
-    audit({
-      event: "page.render",
-      outcome: "error",
-      actorId: user.id,
-      actorRole: user.role,
-      documentId,
-      page,
-      ip: extractIp(req),
-      userAgent: userAgent(req),
-      detail: { error: error.message },
-    });
-    return sendError(res, 500, "render_error", error.message);
+    const status = Number(error.statusCode) || 500;
+    const errCode = error.code || "render_error";
+    if (error.retryAfter) {
+      res.setHeader("Retry-After", String(error.retryAfter));
+    }
+    await auditAsync(
+      {
+        event: "page.render",
+        outcome: status === 429 || status === 503 ? "deny" : "error",
+        actorId: user.id,
+        actorRole: user.role,
+        documentId,
+        page,
+        ip: extractIp(req),
+        userAgent: userAgent(req),
+        detail: { code: errCode, error: error.message },
+      },
+      user,
+    );
+    return sendError(res, status, errCode, error.message);
   }
 }
 
@@ -1300,9 +1395,9 @@ async function handleAudio(req, res, documentId) {
     return methodNotAllowed(res, "GET");
   }
 
-  const user = currentUser(req);
+  const user = await currentUserAsync(req);
   if (!user) {
-    audit({
+    await auditAsync({
       event: "audio.play",
       outcome: "deny",
       actorId: null,
@@ -1315,26 +1410,33 @@ async function handleAudio(req, res, documentId) {
     return sendError(res, 401, "not_authenticated", "No valid session.");
   }
 
-  const verdict = canReadDocument(user, documentId);
+  const verdict = await canReadDocumentAsync(user, documentId);
   if (!verdict.allowed) {
-    audit({
-      event: "audio.play",
-      outcome: "deny",
-      actorId: user.id,
-      actorRole: user.role,
-      documentId,
-      ip: extractIp(req),
-      userAgent: userAgent(req),
-      detail: { reason: verdict.reason },
-    });
+    await auditAsync(
+      {
+        event: "audio.play",
+        outcome: "deny",
+        actorId: user.id,
+        actorRole: user.role,
+        documentId,
+        ip: extractIp(req),
+        userAgent: userAgent(req),
+        detail: { reason: verdict.reason },
+      },
+      user,
+    );
     return sendError(res, 403, verdict.reason, `Access denied: ${verdict.reason}.`);
   }
 
   const query = parseQuery(req.url);
   const page = Number(req.headers["x-page"] ?? query.page ?? 1);
   const chapter = query.chapter
-    ? findChapterById(documentId, String(query.chapter))
-    : findChapterForPage(documentId, Number.isFinite(page) && page >= 1 ? page : 1);
+    ? await findChapterByIdAsync(user, documentId, String(query.chapter))
+    : await findChapterForPageAsync(
+        user,
+        documentId,
+        Number.isFinite(page) && page >= 1 ? page : 1,
+      );
 
   if (query.token !== undefined) {
     try {
@@ -1347,7 +1449,29 @@ async function handleAudio(req, res, documentId) {
         Number(claims.ent) !== Number(verdict.entitlement.version) ||
         chapterMismatch
       ) {
-        audit({
+        await auditAsync(
+          {
+            event: "audio.play",
+            outcome: "deny",
+            actorId: user.id,
+            actorRole: user.role,
+            documentId,
+            ip: extractIp(req),
+            userAgent: userAgent(req),
+            detail: { reason: "audio_token_claim_mismatch" },
+          },
+          user,
+        );
+        return sendError(
+          res,
+          403,
+          "invalid_audio_token",
+          "Audio token is not valid for this session or chapter.",
+        );
+      }
+    } catch (error) {
+      await auditAsync(
+        {
           event: "audio.play",
           outcome: "deny",
           actorId: user.id,
@@ -1355,21 +1479,10 @@ async function handleAudio(req, res, documentId) {
           documentId,
           ip: extractIp(req),
           userAgent: userAgent(req),
-          detail: { reason: "audio_token_claim_mismatch" },
-        });
-        return sendError(res, 403, "invalid_audio_token", "Audio token is not valid for this session or chapter.");
-      }
-    } catch (error) {
-      audit({
-        event: "audio.play",
-        outcome: "deny",
-        actorId: user.id,
-        actorRole: user.role,
-        documentId,
-        ip: extractIp(req),
-        userAgent: userAgent(req),
-        detail: { reason: error.code || "invalid_audio_token" },
-      });
+          detail: { reason: error.code || "invalid_audio_token" },
+        },
+        user,
+      );
       return sendError(res, 403, "invalid_audio_token", error.message);
     }
   }
@@ -1389,20 +1502,22 @@ async function handleAudio(req, res, documentId) {
   const mime = chapter.audio_mime || "audio/wav";
   const rangeHeader = req.headers.range;
 
-  // Record audit entry on initial audio fetch or byte=0 start to avoid spamming every scrub chunk.
   const isInitialOrStart = !rangeHeader || /^bytes=0-/i.test(String(rangeHeader));
   if (isInitialOrStart) {
-    audit({
-      event: "audio.play",
-      outcome: "allow",
-      actorId: user.id,
-      actorRole: user.role,
-      documentId,
-      page: Number.isFinite(page) ? page : chapter.start_page,
-      ip: extractIp(req),
-      userAgent: userAgent(req),
-      detail: { chapterId: chapter.id, ordinal: chapter.ordinal },
-    });
+    await auditAsync(
+      {
+        event: "audio.play",
+        outcome: "allow",
+        actorId: user.id,
+        actorRole: user.role,
+        documentId,
+        page: Number.isFinite(page) ? page : chapter.start_page,
+        ip: extractIp(req),
+        userAgent: userAgent(req),
+        detail: { chapterId: chapter.id, ordinal: chapter.ordinal },
+      },
+      user,
+    );
   }
 
   if (typeof rangeHeader === "string" && rangeHeader.startsWith("bytes=")) {
@@ -1442,15 +1557,15 @@ async function handleAudio(req, res, documentId) {
 /* ------------------------------------------------------------------ */
 
 async function handleProgress(req, res, documentId) {
-  const user = currentUser(req);
+  const user = await currentUserAsync(req);
   if (!user) {
     return sendError(res, 401, "not_authenticated", "No valid session.");
   }
-  const verdict = canReadDocument(user, documentId);
+  const verdict = await canReadDocumentAsync(user, documentId);
   if (!verdict.allowed) {
     return sendError(res, 403, verdict.reason, `Access denied: ${verdict.reason}.`);
   }
-  const document = findDocument(documentId);
+  const document = await findDocumentAsync(user, documentId);
   if (!document) {
     return sendError(res, 404, "not_found", "Document not found.");
   }
@@ -1458,7 +1573,7 @@ async function handleProgress(req, res, documentId) {
   if (req.method === "GET") {
     return sendJson(res, 200, {
       ok: true,
-      progress: getProgress(user.id, documentId) || {
+      progress: (await getProgressAsync(user, user.id, documentId)) || {
         last_page: 1,
         pages_read: 0,
         updated_at: null,
@@ -1482,7 +1597,7 @@ async function handleProgress(req, res, documentId) {
         `Page must be between 1 and ${document.page_count}.`,
       );
     }
-    recordProgress({
+    await recordProgressAsync(user, {
       userId: user.id,
       documentId,
       page,
@@ -1490,7 +1605,7 @@ async function handleProgress(req, res, documentId) {
     });
     return sendJson(res, 200, {
       ok: true,
-      progress: getProgress(user.id, documentId),
+      progress: await getProgressAsync(user, user.id, documentId),
     });
   }
 
@@ -1503,52 +1618,38 @@ async function handleProgress(req, res, documentId) {
 
 async function handleAdminStats(req, res) {
   if (req.method !== "GET") return methodNotAllowed(res, "GET");
-  const admin = ensureAdmin(req, res, "admin.stats");
+  const admin = await ensureAdminAsync(req, res, "admin.stats");
   if (!admin) return;
 
-  const db = getDb();
-  const activeEntitlements =
-    db
-      .prepare("SELECT COUNT(*) AS n FROM entitlements WHERE status = 'active'")
-      .get()?.n ?? 0;
-  const auditAllows =
-    db
-      .prepare("SELECT COUNT(*) AS n FROM audit_log WHERE outcome = 'allow'")
-      .get()?.n ?? 0;
-  const auditDenies =
-    db
-      .prepare("SELECT COUNT(*) AS n FROM audit_log WHERE outcome = 'deny'")
-      .get()?.n ?? 0;
+  const adapter = await getPersistenceAdapter();
+  const stats = await adapter.getAdminStats(admin);
 
   return sendJson(res, 200, {
     ok: true,
-    users: listUsers().length,
-    documents: listDocuments().length,
-    activeEntitlements,
-    auditAllows,
-    auditDenies,
+    ...stats,
+    backend: adapter.kind,
     timestamp: nowIso(),
   });
 }
 
 async function handleAdminUsers(req, res) {
   if (req.method !== "GET") return methodNotAllowed(res, "GET");
-  const admin = ensureAdmin(req, res, "admin.users.list");
+  const admin = await ensureAdminAsync(req, res, "admin.users.list");
   if (!admin) return;
 
   return sendJson(res, 200, {
     ok: true,
-    users: listUsers(),
+    users: await listUsersAsync(admin),
   });
 }
 
 async function handleAdminAudit(req, res) {
   if (req.method !== "GET") return methodNotAllowed(res, "GET");
-  const admin = ensureAdmin(req, res, "admin.audit.list");
+  const admin = await ensureAdminAsync(req, res, "admin.audit.list");
   if (!admin) return;
 
   const query = parseQuery(req.url);
-  const entries = listAudit({
+  const entries = await listAuditAsync(admin, {
     limit: query.limit ? Number(query.limit) : 100,
     documentId: query.documentId || null,
     event: query.event || null,
@@ -1563,14 +1664,14 @@ async function handleAdminAudit(req, res) {
 
 async function handleEngineSelftest(req, res) {
   if (req.method !== "GET") return methodNotAllowed(res, "GET");
-  const admin = ensureAdmin(req, res, "admin.engine.selftest");
+  const admin = await ensureAdminAsync(req, res, "admin.engine.selftest");
   if (!admin) return;
 
-  const targetId = requireDemoDocId();
+  const targetId = await requireDemoDocIdAsync();
   if (!targetId) {
     return sendError(res, 404, "not_found", "No document available for self-test.");
   }
-  const doc = findDocument(targetId);
+  const doc = await findDocumentAsync(admin, targetId);
   if (!doc || !privateObjectExists(doc.storage_key)) {
     return sendError(res, 404, "not_found", "Document storage object not found.");
   }
@@ -1578,22 +1679,25 @@ async function handleEngineSelftest(req, res) {
   const testPage = Math.min(2, Math.max(1, doc.page_count));
   const report = await engineSelftest(keyToPath(doc.storage_key), testPage, 96);
 
-  audit({
-    event: "admin.engine.selftest",
-    outcome: "info",
-    actorId: admin.id,
-    actorRole: "admin",
-    documentId: doc.id,
-    page: testPage,
-    ip: extractIp(req),
-    userAgent: userAgent(req),
-    detail: {
-      watermarkedOutputsDiffer: report.watermarkedOutputsDiffer,
-      watermarkChangesPixels: report.watermarkChangesPixels,
-      shaA: report.shaA,
-      shaB: report.shaB,
+  await auditAsync(
+    {
+      event: "admin.engine.selftest",
+      outcome: "info",
+      actorId: admin.id,
+      actorRole: "admin",
+      documentId: doc.id,
+      page: testPage,
+      ip: extractIp(req),
+      userAgent: userAgent(req),
+      detail: {
+        watermarkedOutputsDiffer: report.watermarkedOutputsDiffer,
+        watermarkChangesPixels: report.watermarkChangesPixels,
+        shaA: report.shaA,
+        shaB: report.shaB,
+      },
     },
-  });
+    admin,
+  );
 
   return sendJson(res, 200, {
     ok: true,

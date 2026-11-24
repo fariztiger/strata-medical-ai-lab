@@ -594,7 +594,7 @@ CREATE POLICY sessions_owner_or_admin ON public.sessions
 
 DROP POLICY IF EXISTS entitlements_read_own_or_admin ON public.entitlements;
 CREATE POLICY entitlements_read_own_or_admin ON public.entitlements
-  FOR SELECT TO cv_app_user, cv_runtime
+  FOR SELECT TO cv_app_user, cv_runtime, cv_owner
   USING (public.cv_current_user_role() = 'admin' OR user_id = public.cv_current_user_id());
 
 DROP POLICY IF EXISTS entitlements_admin_write ON public.entitlements;

@@ -34,6 +34,16 @@ function normalizeActor(actor = {}) {
   };
 }
 
+function hasReturnedRows(res) {
+  return Array.isArray(res?.rows) && res.rows.length > 0;
+}
+
+function affectedRowCount(res) {
+  if (typeof res?.rowCount === "number") return res.rowCount;
+  if (typeof res?.affectedRows === "number") return res.affectedRows;
+  return 0;
+}
+
 function mapPgUser(row) {
   if (!row) return null;
   return {
@@ -910,7 +920,7 @@ export class PostgresPersistenceAdapter {
         "SELECT * FROM public.cv_lookup_auth_user($1)",
         [String(email).trim()],
       );
-      if (res.rowCount === 0) return null;
+      if (!hasReturnedRows(res)) return null;
       const row = res.rows[0];
       return {
         ...mapPgUser(row),
@@ -933,7 +943,7 @@ export class PostgresPersistenceAdapter {
     if (!sessionId) return null;
     return this.withActorContext({ role: "anonymous" }, async (client) => {
       const res = await client.query("SELECT * FROM public.cv_resolve_session($1)", [sessionId]);
-      if (res.rowCount === 0) return null;
+      if (!hasReturnedRows(res)) return null;
       const r = res.rows[0];
       return {
         session: {
@@ -1132,7 +1142,7 @@ export class PostgresPersistenceAdapter {
          WHERE id = $4 AND document_id = $5`,
         [audioKey, audioMime, audioSeconds ?? null, chapterId, documentId],
       );
-      return res.rowCount > 0;
+      return affectedRowCount(res) > 0;
     });
   }
 
@@ -1269,7 +1279,7 @@ export class PostgresPersistenceAdapter {
         "SELECT last_page, pages_read, updated_at FROM reading_progress WHERE user_id = $1 AND document_id = $2",
         [userId, documentId],
       );
-      if (res.rowCount === 0) return null;
+      if (!hasReturnedRows(res)) return null;
       const r = res.rows[0];
       return {
         last_page: Number(r.last_page),
@@ -1421,7 +1431,7 @@ export class PostgresPersistenceAdapter {
               Boolean(protectLockout),
             ],
           );
-          if (fnRes.rowCount > 0) {
+          if (hasReturnedRows(fnRes)) {
             this._hasHardening002 = true;
             const r = fnRes.rows[0];
             return {
@@ -1448,7 +1458,7 @@ export class PostgresPersistenceAdapter {
           "SELECT window_start_ms, expires_at_ms, count FROM rate_limit_buckets WHERE bucket_key = $1",
           [key],
         );
-        if (cur.rowCount === 0) {
+        if (!hasReturnedRows(cur)) {
           return { allowed: true, count: 0, remaining: limit };
         }
         const row = cur.rows[0];
@@ -1537,7 +1547,7 @@ export class PostgresPersistenceAdapter {
             "SELECT public.cv_redeem_token($1, $2, $3) AS redeemed",
             [jti, nowSec, expiresAtEpochSec],
           );
-          if (fnRes.rowCount > 0 && "redeemed" in fnRes.rows[0]) {
+          if (hasReturnedRows(fnRes) && "redeemed" in fnRes.rows[0]) {
             this._hasHardening002 = true;
             return Boolean(fnRes.rows[0].redeemed);
           }
@@ -1556,7 +1566,7 @@ export class PostgresPersistenceAdapter {
          ON CONFLICT (jti) DO NOTHING`,
         [jti, nowSec, expiresAtEpochSec],
       );
-      return ins.rowCount === 1;
+      return affectedRowCount(ins) === 1;
     });
   }
 }
