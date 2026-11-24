@@ -237,7 +237,66 @@ async function handleAuth(req, res) {
     if (req.method !== "POST") return methodNotAllowed(res, "POST");
     return handleRegister(req, res);
   }
+  if (action === "demo-personas") {
+    if (req.method !== "GET") return methodNotAllowed(res, "GET");
+    return handleDemoPersonas(req, res);
+  }
   return notFound(res);
+}
+
+function handleDemoPersonas(_req, res) {
+  if (process.env.NODE_ENV === "production") {
+    return sendJson(res, 200, { ok: true, enabled: false, personas: [] });
+  }
+  const adminPass =
+    process.env.CV_DEMO_ADMIN_PASSWORD || "strata-demo-admin-local";
+  const studentPass =
+    process.env.CV_DEMO_STUDENT_PASSWORD || "strata-demo-student-local";
+  const demoDocIdValue = requireDemoDocId();
+
+  return sendJson(res, 200, {
+    ok: true,
+    enabled: true,
+    demoDocumentId: demoDocIdValue,
+    personas: [
+      {
+        id: "admin",
+        email: "admin@strata.local",
+        password: adminPass,
+        labelEn: "Administrator",
+        labelZh: "平台管理员",
+        noteEn: "Upload PDFs, grant/revoke access, audit logs",
+        noteZh: "上传受保护文档、授权/撤销访问、审计日志",
+      },
+      {
+        id: "studentA",
+        email: "aisyah@student.strata.local",
+        password: studentPass,
+        labelEn: "Student A · Nurul Aisyah",
+        labelZh: "学员 A · Nurul Aisyah",
+        noteEn: "Entitled · Unique burned-in watermark A",
+        noteZh: "已授权 · 专属服务端像素水印 A",
+      },
+      {
+        id: "studentB",
+        email: "weiming@student.strata.local",
+        password: studentPass,
+        labelEn: "Student B · Tan Wei Ming",
+        labelZh: "学员 B · Tan Wei Ming",
+        noteEn: "Entitled · Distinct burned-in watermark B",
+        noteZh: "已授权 · 独立服务端像素水印 B",
+      },
+      {
+        id: "studentC",
+        email: "priya@student.strata.local",
+        password: studentPass,
+        labelEn: "Student C · Priya Menon",
+        labelZh: "学员 C · Priya Menon",
+        noteEn: "Unentitled · Demonstrates 403 access denial",
+        noteZh: "未授权 · 演示 403 越权拦截",
+      },
+    ],
+  });
 }
 
 async function handleLogin(req, res) {

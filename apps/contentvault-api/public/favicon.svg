@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="STRATA ContentVault">
+  <rect width="64" height="64" rx="12" fill="#142B40"/>
+  <rect x="6" y="6" width="52" height="52" rx="8" fill="none" stroke="#C5A46D" stroke-width="2"/>
+  <path d="M20 23h24v4H20zm0 11h18v4H20zm0 11h24v4H20z" fill="#F7F5EF"/>
+  <circle cx="46" cy="36" r="6" fill="#17594D" stroke="#C5A46D" stroke-width="1.8"/>
+</svg>
