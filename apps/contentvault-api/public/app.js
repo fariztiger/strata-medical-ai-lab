@@ -740,6 +740,9 @@
     currentAudioBlobUrl = URL.createObjectURL(audioBlob);
     loadedAudioChapterId = chapter.id;
     player.src = currentAudioBlobUrl;
+    if (typeof player.load === "function") {
+      player.load();
+    }
     statusEl.textContent = t("audioReady");
   }
 

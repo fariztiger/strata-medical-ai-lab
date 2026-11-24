@@ -12,6 +12,7 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'cv_app_user') THEN
     CREATE ROLE cv_app_user NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
   END IF;
+  EXECUTE format('GRANT cv_app_user TO %I', current_user);
 END
 $$;
 

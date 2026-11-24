@@ -41,10 +41,14 @@ try {
 
   const adapter = new PostgresPersistenceAdapter(pool);
 
+  // Clean tables as migration owner (`strata_owner`) before testing `cv_app_user` RLS
+  await pool.query(
+    "TRUNCATE users, documents, portfolio_enquiries, audit_log, token_redemptions, rate_limit_buckets RESTART IDENTITY CASCADE",
+  );
+
   // Provision synthetic test data under Admin RLS context
   const adminActor = { id: "usr_admin_pg", role: "admin" };
   await adapter.withActorContext(adminActor, async (client) => {
-    await client.query("TRUNCATE users, documents, portfolio_enquiries, audit_log, token_redemptions, rate_limit_buckets CASCADE");
 
     await client.query(
       `INSERT INTO users (id, email, display_name, role, password_hash, locale) VALUES

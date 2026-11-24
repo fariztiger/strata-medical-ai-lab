@@ -367,6 +367,7 @@ describe("Mission 004 Phase C — Production Architecture Prototypes & Safeguard
       removeAttribute(k) { this.attrs.delete(k); },
       addEventListener() {},
       pause() {},
+      load() {},
     });
     for (const id of ids) elements.set(id, mkEl(id));
 

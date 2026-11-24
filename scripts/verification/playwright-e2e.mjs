@@ -255,18 +255,33 @@ try {
   // Verify HTML5 <audio> loads authenticated blob and plays
   await stuAPage.waitForFunction(() => {
     const a = document.getElementById("reader-audio-player");
-    return a && a.src.startsWith("blob:") && a.readyState >= 1 && a.duration > 0;
+    return a && a.src && a.src.startsWith("blob:");
   });
   const audioCheck = await stuAPage.evaluate(async () => {
     const a = document.getElementById("reader-audio-player");
-    await a.play();
-    await new Promise((r) => setTimeout(r, 250));
-    const progressed = a.currentTime > 0 || !a.paused;
+    if (a.readyState === 0) {
+      a.load();
+      await new Promise((resolve) => {
+        if (a.readyState >= 1) return resolve();
+        a.addEventListener("loadedmetadata", resolve, { once: true });
+        setTimeout(resolve, 4000);
+      });
+    }
+    let playSucceeded = false;
+    try {
+      await a.play();
+      playSucceeded = true;
+      await new Promise((r) => setTimeout(r, 250));
+    } catch {
+      playSucceeded = false;
+    }
+    const currentTime = a.currentTime;
+    const duration = Number.isFinite(a.duration) ? a.duration : 0;
     a.pause();
-    return { duration: a.duration, currentTime: a.currentTime, progressed };
+    return { duration, currentTime, readyState: a.readyState, playSucceeded };
   });
-  assert.ok(audioCheck.duration > 0.5, "Authenticated chapter audio duration must be > 0.5s");
-  assert.equal(audioCheck.progressed, true, "HTML5 <audio> must play in Chromium");
+  assert.ok(audioCheck.duration > 0.5, `Authenticated chapter audio duration must be > 0.5s (got ${audioCheck.duration})`);
+  assert.equal(audioCheck.playSucceeded, true, "HTML5 <audio> must play in Chromium");
   await assertNoHorizontalOverflow(stuAPage, "desktop-student-a-reader");
 
   const s2 = "02-desktop-student-a-reader-en.png";
@@ -287,9 +302,9 @@ try {
 
   // Toggle language EN -> 中文 and verify DOM translation updates
   await stuBPage.click("#btn-locale-en");
-  assert.equal(await stuBPage.textContent("#tab-student-library"), "Assigned Library");
+  assert.equal((await stuBPage.textContent("#tab-student-library")).trim(), "Assigned Library");
   await stuBPage.click("#btn-locale-zh");
-  assert.equal(await stuBPage.textContent("#tab-student-library"), "已授权课程库");
+  assert.equal((await stuBPage.textContent("#tab-student-library")).trim(), "已授权课程库");
 
   await stuBPage.click("[data-open-doc]");
   await waitForRenderedPageImage(stuBPage);
@@ -364,10 +379,10 @@ try {
   report.screenshots.push(s6a);
 
   await revPage.click("#btn-reviewer-open-portfolio");
-  await revPage.waitForSelector("#pf-enq-form");
+  await revPage.waitForSelector("#enquiry-form");
   await assertNoHorizontalOverflow(revPage, "desktop-portfolio-en");
 
-  await revPage.click("#pf-lang-zh");
+  await revPage.click("#pf-zh");
   await revPage.waitForFunction(() => document.documentElement.lang === "zh-Hans");
   await assertNoHorizontalOverflow(revPage, "desktop-portfolio-zh");
 
@@ -416,7 +431,7 @@ try {
   await mobRevPage.click("#btn-login-submit");
   await mobRevPage.waitForSelector("#header-portfolio-link:not(.hidden)");
   await mobRevPage.goto(`${BASE_URL}/portfolio`);
-  await mobRevPage.waitForSelector("#pf-enq-form");
+  await mobRevPage.waitForSelector("#enquiry-form");
   await assertNoHorizontalOverflow(mobRevPage, "mobile-portfolio");
 
   const s8 = "08-mobile-portfolio-en.png";
