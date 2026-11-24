@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-Generate authentic live-state persona visual captures from the running
-STRATA ContentVault server (http://127.0.0.1:7410).
+[DEPRECATED — HISTORICAL v0.1.1 NON-BROWSER COMPOSITE GENERATOR (`AUD-B2`)]
 
-Because this minimal sandbox container does not ship with a Chromium/X11 binary,
-this script logs into the LIVE HTTP server as each of the four personas (Admin,
-Student A [EN], Student B [Mandarin ZH], and Unauthorized Student C), fetches
-the real API responses and real server-rasterised watermarked PNG page bytes,
-and renders 1440x920 visual inspection frames via PyMuPDF (with native CJK
-`china-ss` font support).
+DO NOT USE OUTPUTS OF THIS SCRIPT AS BROWSER VERIFICATION EVIDENCE.
+Superseded in Mission 004 / Mission 005 by genuine Chromium Desktop (1440x900)
+and Mobile (390x844) browser E2E verification (`scripts/verification/playwright-e2e.mjs`),
+whose real browser screenshots are stored in `reports/browser-screenshots/`.
+
+Historical v0.1.1 description:
+Generate live-state API composite visual inspection frames from the running
+STRATA ContentVault server (http://127.0.0.1:7410) when no browser binary is installed.
 """
 
 from __future__ import annotations

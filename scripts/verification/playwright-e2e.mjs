@@ -414,6 +414,11 @@ try {
   await waitForRenderedPageImage(mobStuPage, 2);
   await assertNoHorizontalOverflow(mobStuPage, "mobile-student-reader");
 
+  // AUD-B1 remediation: capture unobstructed 390x844 watermarked canvas BEFORE opening drawer
+  const s7a = "07a-mobile-student-a-canvas.png";
+  await mobStuPage.screenshot({ path: path.join(SCREENSHOT_DIR, s7a), fullPage: false });
+  report.screenshots.push(s7a);
+
   await mobStuPage.click("#btn-toggle-chapters");
   await mobStuPage.waitForSelector("#reader-sidebar.mobile-open");
   await assertNoHorizontalOverflow(mobStuPage, "mobile-student-drawer-open");

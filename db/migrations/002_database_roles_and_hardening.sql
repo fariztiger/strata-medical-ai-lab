@@ -54,6 +54,7 @@ BEGIN
   -- Allow current migration executor to transfer ownership to cv_owner / cv_auth_definer
   EXECUTE format('GRANT cv_owner TO %I', current_user);
   EXECUTE format('GRANT cv_auth_definer TO %I', current_user);
+  EXECUTE format('GRANT cv_backup_maint TO %I', current_user);
 END
 $$;
 

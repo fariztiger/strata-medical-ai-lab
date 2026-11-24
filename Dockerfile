@@ -44,6 +44,7 @@ COPY db/migrations ./db/migrations
 COPY scripts/operations ./scripts/operations
 COPY scripts/packaging ./scripts/packaging
 COPY docs/licensing ./docs/licensing
+RUN cp ./docs/licensing/THIRD_PARTY_NOTICES.md /opt/strata/THIRD_PARTY_NOTICES.txt
 
 RUN mkdir -p /var/lib/contentvault && \
     chown -R node:node /var/lib/contentvault /opt/strata && \

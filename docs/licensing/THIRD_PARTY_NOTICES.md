@@ -96,3 +96,14 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may obtain a copy of the License at:
     http://www.apache.org/licenses/LICENSE-2.0
 ```
+
+### 2.5 Transitive Native Binary Credits (`PDFium` & `Pillow` Wheels)
+
+```text
+FreeType Project License (FTL) Credit:
+Portions of this software are copyright © The FreeType Project (www.freetype.org).
+All rights reserved.
+
+Independent JPEG Group (IJG) / libjpeg-turbo Documentation Notice:
+This software is based in part on the work of the Independent JPEG Group.
+```

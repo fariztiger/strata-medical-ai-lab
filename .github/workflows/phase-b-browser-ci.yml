@@ -128,9 +128,10 @@ jobs:
       - name: Verify Mission 004 PostgreSQL 16 RLS baseline script
         env:
           DATABASE_URL: "postgres://strata_owner:strata_ci_ephemeral_pw@127.0.0.1:5432/contentvault_ci"
+          CV_PG_MODULE: "../../apps/contentvault-api/node_modules/pg/lib/index.js"
         run: node scripts/verification/verify-postgres-rls.mjs
 
-      - name: Provision dedicated PG16 databases & execute 005-A HTTP App + 005-B cv_runtime Privilege Suites
+      - name: Provision dedicated PG16 databases & execute 005-A HTTP App + 005-B cv_runtime Privilege + 005-E Backup/Restore Suites
         working-directory: apps/contentvault-api
         env:
           CV_PG_RUNTIME_PASSWORD: "cv_runtime_ci_ephemeral_pw_2026"
@@ -144,6 +145,7 @@ jobs:
               await c.connect();
               await c.query("CREATE DATABASE contentvault_app_ci");
               await c.query("CREATE DATABASE contentvault_priv_ci");
+              await c.query("CREATE DATABASE contentvault_restore_ci");
               await c.end();
             });
           '
@@ -158,3 +160,11 @@ jobs:
           DATABASE_URL="postgres://cv_runtime:cv_runtime_ci_ephemeral_pw_2026@127.0.0.1:5432/contentvault_priv_ci" \
           DATABASE_MIGRATION_URL="postgres://strata_owner:strata_ci_ephemeral_pw@127.0.0.1:5432/contentvault_priv_ci" \
             node --test tests/phase-005-db-privileges.test.js
+
+          DATABASE_MIGRATION_URL="postgres://strata_owner:strata_ci_ephemeral_pw@127.0.0.1:5432/contentvault_restore_ci" \
+            npm run migrate:pg
+          DATABASE_URL="postgres://strata_owner:strata_ci_ephemeral_pw@127.0.0.1:5432/contentvault_app_ci" \
+            node ../../scripts/operations/backup-restore.mjs backup-pg --out /tmp/pg-ci-backup
+          node ../../scripts/operations/backup-restore.mjs verify --bundle /tmp/pg-ci-backup
+          DATABASE_MIGRATION_URL="postgres://strata_owner:strata_ci_ephemeral_pw@127.0.0.1:5432/contentvault_restore_ci" \
+            node ../../scripts/operations/backup-restore.mjs restore-pg --bundle /tmp/pg-ci-backup
