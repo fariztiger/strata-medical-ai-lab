@@ -136,20 +136,25 @@ async function assertNoHorizontalOverflow(page, label) {
   return metrics;
 }
 
-async function waitForRenderedPageImage(page) {
+async function waitForRenderedPageImage(page, expectedPage = 1) {
   await page.waitForFunction(
-    () => {
+    (exp) => {
       const img = document.getElementById("reader-page-img");
       const fig = document.getElementById("reader-figure");
+      const loading = document.getElementById("reader-loading");
       return (
         img &&
         fig &&
+        loading &&
+        loading.classList.contains("hidden") &&
         !fig.classList.contains("hidden") &&
+        img.dataset.renderedPage === String(exp) &&
         img.complete &&
         img.naturalWidth > 800 &&
         img.src.startsWith("blob:")
       );
     },
+    expectedPage,
     { timeout: 20_000 },
   );
   return page.evaluate(async () => {
@@ -242,14 +247,13 @@ try {
   const docId = await stuAPage.getAttribute("[data-open-doc]", "data-open-doc");
   await stuAPage.click("[data-open-doc]");
 
-  const p1ImgA = await waitForRenderedPageImage(stuAPage);
+  const p1ImgA = await waitForRenderedPageImage(stuAPage, 1);
   assert.equal(p1ImgA.naturalWidth, 1190);
   assert.equal(p1ImgA.naturalHeight, 1684);
 
   // Navigate to Page 2 via Next button and verify page update + audio playback
   await stuAPage.click("#btn-next-page");
-  await stuAPage.waitForFunction(() => document.getElementById("input-page-num")?.value === "2");
-  const p2ImgA = await waitForRenderedPageImage(stuAPage);
+  const p2ImgA = await waitForRenderedPageImage(stuAPage, 2);
   assert.notEqual(p1ImgA.sampleHash, p2ImgA.sampleHash, "Page 2 raster must differ from Page 1");
 
   // Verify HTML5 <audio> loads authenticated blob and plays
@@ -307,10 +311,9 @@ try {
   assert.equal((await stuBPage.textContent("#tab-student-library")).trim(), "已授权课程库");
 
   await stuBPage.click("[data-open-doc]");
-  await waitForRenderedPageImage(stuBPage);
+  await waitForRenderedPageImage(stuBPage, 1);
   await stuBPage.click("#btn-next-page");
-  await stuBPage.waitForFunction(() => document.getElementById("input-page-num")?.value === "2");
-  const p2ImgB = await waitForRenderedPageImage(stuBPage);
+  const p2ImgB = await waitForRenderedPageImage(stuBPage, 2);
   assert.notEqual(
     p2ImgA.sampleHash,
     p2ImgB.sampleHash,
@@ -407,7 +410,7 @@ try {
   await mobStuPage.waitForSelector("[data-open-doc]");
   await assertNoHorizontalOverflow(mobStuPage, "mobile-student-library");
   await mobStuPage.click("[data-open-doc]");
-  await waitForRenderedPageImage(mobStuPage);
+  await waitForRenderedPageImage(mobStuPage, 1);
   await assertNoHorizontalOverflow(mobStuPage, "mobile-student-reader");
 
   await mobStuPage.click("#btn-toggle-chapters");

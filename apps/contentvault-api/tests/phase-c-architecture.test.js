@@ -346,6 +346,7 @@ describe("Mission 004 Phase C — Production Architecture Prototypes & Safeguard
       innerHTML: "",
       value: "",
       style: {},
+      dataset: {},
       disabled: false,
       attrs: new Map(id === "reviewerHeadingNode" ? [["data-i18n", "reviewerHeading"]] : []),
       classList: {

@@ -679,7 +679,12 @@
     }
     currentPageBlobUrl = URL.createObjectURL(blob);
     const img = $("reader-page-img");
+    img.dataset.renderedPage = "";
     img.src = currentPageBlobUrl;
+    if (typeof img.decode === "function") {
+      await img.decode().catch(() => {});
+    }
+    img.dataset.renderedPage = String(activePage);
     $("reader-figure").classList.remove("hidden");
 
     // Populate live server security headers proof
