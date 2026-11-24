@@ -1,0 +1,61 @@
+name: STRATA Sustainability & Real-Browser Verification
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-browser-and-pdfium:
+    name: Chromium E2E (1440x900 + 390x844) & Regression Suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install pinned pypdfium2 + Apache-2.0 CJK font
+        run: ./scripts/setup/install-python-deps.sh
+
+      - name: Execute automated backend & security test suite
+        working-directory: apps/contentvault-api
+        run: |
+          npm run seed
+          npm test
+
+      - name: Install Playwright & Chromium (isolated CI runner workspace)
+        run: |
+          mkdir -p /tmp/pw-runner
+          cd /tmp/pw-runner
+          npm init -y
+          npm install --no-audit --no-fund playwright@1.51.1
+          npx playwright install --with-deps chromium
+
+      - name: Run genuine Chromium Desktop (1440x900) & Mobile (390x844) E2E suite
+        env:
+          CV_REQUIRE_BROWSER: "1"
+          CV_PLAYWRIGHT_MODULE: "/tmp/pw-runner/node_modules/playwright/index.mjs"
+        run: node scripts/verification/playwright-e2e.mjs --strict
+
+      - name: Upload genuine Chromium browser screenshots & verification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chromium-browser-evidence
+          path: reports/browser-screenshots/
+          if-no-files-found: error
+          retention-days: 30

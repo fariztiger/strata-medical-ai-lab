@@ -262,7 +262,7 @@
       badgeEn: "VERIFIED PEER-REVIEWED DOI · 2014",
       badgeZh: "已核实同行评审期刊 DOI · 2014",
       citationEn:
-        "Gopalai AA, Lim SY, ..., Eow GB, et al. LRR2 G2385R and R1628P Mutations Are Associated with an Increased Risk of Parkinson's Disease in the Malaysian Population. BioMed Research International 2014:867321.",
+        "Gopalai AA, Lim SY, ..., Eow GB, et al. LRRK2 G2385R and R1628P Mutations Are Associated with an Increased Risk of Parkinson's Disease in the Malaysian Population. BioMed Research International 2014:867321.",
       citationZh:
         "Gopalai AA, Lim SY, ..., Eow GB 等：《马来西亚人群 LRRK2 G2385R 与 R1628P 突变与帕金森病风险研究》，BioMed Research International 2014:867321。",
       url: "https://doi.org/10.1155/2014/867321",

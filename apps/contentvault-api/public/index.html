@@ -387,7 +387,7 @@
           <div class="card form-card-narrow">
             <h2 class="card-title serif-heading" data-i18n="uploadHeading">Ingest Private PDF into ContentVault</h2>
             <p class="muted-sm" data-i18n="uploadSub">
-              Uploaded PDFs are validated via PyMuPDF, written under an opaque key with 0600 permissions outside the web root, and never served directly. Use synthetic or authorized material only.
+              Uploaded PDFs are validated via the modular PDFium engine, written under an opaque key with 0600 permissions outside the web root, and never served directly. Use synthetic or authorized material only.
             </p>
 
             <form id="upload-form" class="form-stack">
@@ -442,6 +442,7 @@
                     <label for="reg-role" data-i18n="roleLabel">Role</label>
                     <select id="reg-role">
                       <option value="student">Student</option>
+                      <option value="reviewer">Reviewer (Portfolio Access)</option>
                       <option value="admin">Administrator</option>
                     </select>
                   </div>

@@ -85,7 +85,7 @@
       currentEntitlementsHeading: "Current Learner Entitlements",
       uploadHeading: "Ingest Private PDF into ContentVault",
       uploadSub:
-        "Uploaded PDFs are validated via PyMuPDF, written under an opaque key with 0600 permissions outside the web root, and never served directly. Use synthetic or authorized material only.",
+        "Uploaded PDFs are validated via the modular PDFium engine, written under an opaque key with 0600 permissions outside the web root, and never served directly. Use synthetic or authorized material only.",
       titleEnLabel: "Title (English) *",
       titleZhLabel: "Title (Mandarin / 中文)",
       authorLabel: "Author / Source Label",
@@ -194,7 +194,7 @@
       currentEntitlementsHeading: "当前文档授权列表",
       uploadHeading: "导入私有 PDF 至 ContentVault",
       uploadSub:
-        "上传文件经 PyMuPDF 校验后，以随机密钥和 0600 权限存入 Web 根目录之外的私有存储。请仅上传合成或获授权内容。",
+        "上传文件经模块化 PDFium 引擎校验后，以随机密钥和 0600 权限存入 Web 根目录之外的私有存储。请仅上传合成或获授权内容。",
       titleEnLabel: "英文标题 (English) *",
       titleZhLabel: "中文标题 (Mandarin)",
       authorLabel: "作者 / 来源标注",
@@ -444,7 +444,7 @@
           return;
         }
         if (data.previewSession) {
-          setPreviewSession(data.previewSession);
+          previewSessionToken = data.previewSession;
         }
         applySessionState(data.user);
       });
@@ -1204,7 +1204,7 @@
     $("btn-run-selftest").addEventListener("click", async () => {
       const box = $("selftest-output");
       box.classList.remove("hidden");
-      box.textContent = "Executing PyMuPDF server-side pixel verification...";
+      box.textContent = "Executing server-side PDFium pixel verification...";
       const res = await apiJson("/api/admin/engine-selftest");
       if (!res.ok) {
         box.textContent = `Error: ${res.data.message || "Self-test failed"}`;
