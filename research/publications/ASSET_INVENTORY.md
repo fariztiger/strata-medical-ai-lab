@@ -1,40 +1,34 @@
-# STRATA Preliminary Publication & Educational Asset Inventory
+# STRATA Publication & Educational Asset Verification Inventory (M003)
 
-- **Milestone:** M003 (Preliminary Publication & Programme Catalogue)
-- **Date:** 2026-11-24
-- **Governance Rule (`AGENTS.md` §4, §19):** All bibliographic entries below are recorded strictly as `OWNER_SUPPLIED` / `UNVERIFIED` preliminary records. No proprietary book files, Telegram exports, or student data have been ingested; ContentVault v0.1 uses synthetic demonstration files (`knowledge/synthetic/synthetic-neurology-module.pdf`) exclusively.
-
----
-
-## 1. Reported Publication Catalogue
-
-| Finding ID | Reported Title & Edition | Category | Source Origin | Reported Date | Access Date | Evidence Summary | Verification Status | Limitations & Recommended Action |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| **PUB-001** | *Practical Approach to Clinical Neurology* (1st ed.) | Medical Education | `AGENTS.md` §4 | 2009 | 2026-11-24 | Preliminary catalogue entry supplied by project owner. | `OWNER_SUPPLIED` | Verify publisher, ISBN, co-authors, and copyright holder via Perpustakaan Negara Malaysia (PNM) catalogue. |
-| **PUB-002** | *Pacing the PACES: Tips for passing MRCP and MBBS* (1st ed.) | Medical Education | `AGENTS.md` §4 | 2011 | 2026-11-24 | Preliminary catalogue entry supplied by project owner. | `OWNER_SUPPLIED` | Verify exact subtitle, ISBN, publisher, and edition history. |
-| **PUB-003** | *Electroencephalogram Examples & Guides (EEG)* (1st ed.) | Medical Education | `AGENTS.md` §4 | 2013 | 2026-11-24 | Preliminary catalogue entry supplied by project owner. | `OWNER_SUPPLIED` | Verify bibliographic record and confirm no identifiable patient traces exist before any future authorized digitization. |
-| **PUB-004** | *Neuro-ophthalmology Made Easy* (1st electronic ed.) | Medical Education | `AGENTS.md` §4 | 2020 | 2026-11-24 | Preliminary electronic publication entry. | `OWNER_SUPPLIED` | Verify eISBN, digital rights ownership, and co-authorship. |
-| **PUB-005** | *Electrodiagnostic Medicine: A Case-Based Approach* (1st electronic ed.) | Medical Education | `AGENTS.md` §4 | 2021 | 2026-11-24 | Preliminary electronic publication entry. | `OWNER_SUPPLIED` | Verify eISBN, case anonymization status, and copyright terms. |
-| **PUB-006** | *Clinical Medicine At A Glance* | Medical Education | `AGENTS.md` §4 | Unspecified | 2026-11-24 | Explicitly flagged in `AGENTS.md` as requiring bibliographic verification. | `UNVERIFIED` | Disambiguate against similarly titled international textbooks; confirm exact authorship/contribution with Dr. Eow. |
-| **PUB-007** | *We Are Our Best Doctors: Awaken the Healing Power Within Us* (English ed.) | Personal Development | `AGENTS.md` §4 | 2021 | 2026-11-24 | Preliminary English edition record. | `OWNER_SUPPLIED` | Verify ISBN, publisher, and medical-disclaimer framing. |
-| **PUB-008** | *We Are Our Best Doctors* (Mandarin ed.) | Personal Development | `AGENTS.md` §4 | 2021 | 2026-11-24 | Preliminary Mandarin edition record. | `OWNER_SUPPLIED` | Confirm official Chinese title, translator/editor credits, and ISBN. |
-| **PUB-009** | *Understanding Self Through KHTP and Childhood Memories* (Bilingual ed., reported eISBN `978-983-44306-6-5`) | Personal Development | `AGENTS.md` §4 | 2021 | 2026-11-24 | Includes owner-reported Malaysian `978-983` prefix eISBN; checksum digit `5` is mathematically valid for ISBN-13 (`9789834430665`). | `OWNER_SUPPLIED` | Checksum valid (`INFERRED` structural validity only); verify official title/registrant in Perpustakaan Negara Malaysia depository. Ensure KHTP educational framing complies with `AGENTS.md` §16. |
-| **PUB-010** | *Life Book: A Step-by-Step Guide to Breakthrough, Transformation and Awakening* (Bilingual ed., reported ISBN `978-983-44306-8-9`) | Personal Development | `AGENTS.md` §4 | Unspecified | 2026-11-24 | Includes owner-reported Malaysian `978-983` prefix ISBN; checksum digit `9` is mathematically valid for ISBN-13 (`9789834430689`). | `OWNER_SUPPLIED` | Checksum valid (`INFERRED` structural validity only); verify publication year and registrant in PNM catalogue; keep distinct from Mindvalley's "Lifebook" trademark in any international outreach. |
+- **Milestone:** M003 — Publication & Educational Asset Inventory
+- **Verification Date:** 2026-11-24 (UTC)
+- **Governance Rule (`AGENTS.md` §4, §19):** Distinguishes `VERIFIED`, `PARTIALLY_VERIFIED`, `OWNER_SUPPLIED`, and `UNVERIFIED` bibliographic data. Perpustakaan Negara Malaysia's web OPAC (`https://www.pnm.gov.my/index.php/pages/view/1`) requires interactive session queries and does not expose static crawlable item permalinks; public bibliographic catalogues, DOI registries, and author-archived records were cross-checked without fabricating missing ISBNs.
 
 ---
 
-## 2. Reported Educational Programmes (Preliminary)
+## 1. Authored Books & Educational Monographs (Items 1–10)
 
-All programmes below are recorded as `OWNER_SUPPLIED` hypotheses of current Telegram-distributed offerings (`AGENTS.md` §4–5) requiring partner validation:
-- English Transformation Masterclass & Mandarin Transformation Masterclass
-- Lifebook programmes & KHTP Drawing workshops
-- Decoding the Subconscious Mind & Photo Interpretation (subject to strict `AGENTS.md` §16 non-diagnostic educational boundaries)
-- EEG e-books and audio teaching, Electrodiagnostic education, Neuro-ophthalmology education
-- Drawing and childhood memories education
+| Finding ID | Title & Reported Details | Source URL / Evidence Origin | Pub. Date | Verification Date | Evidence Summary | Status | Limitations & Action |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| **PUB-001** | *Practical Approach to Clinical Neurology* (Reported 1st ed., 2009) | `AGENTS.md` §4 | 2009 (reported) | 2026-11-24 | No open-web ISBN listing located outside gated PNM OPAC. | `OWNER_SUPPLIED` (`UNVERIFIED`) | Display with `[UNVERIFIED ISBN/PUBLISHER PLACEHOLDER]`; inspect physical copyright page or PNM depository record. |
+| **PUB-002** | *Pacing the PACES: Tips for Passing MRCP and Final MBBS* (1st ed., 2011) | `https://www.abebooks.com/9789834430610/Pacing-Paces-Tips-Passing-MRCP-9834430612/plp` | 2011 | 2026-11-24 | Public book-trade bibliographic record confirms Author: `Eow Gaik Bee`, Exact Title: *Pacing The Paces: Tips for Passing MRCP and Final MBBS*, Publisher: `Penang Hospital`, Date: `2011`, Binding: Paperback, `368 pages`, **ISBN-10 `9834430612` / ISBN-13 `978-983-44306-1-0`**. | `PARTIALLY_VERIFIED` | Strong public bibliographic match including Malaysian `978-983-44306` registrant prefix; confirm directly against PNM CIP page for `VERIFIED` upgrade. |
+| **PUB-003** | *Electroencephalogram Examples & Guides (EEG)* (Reported 1st ed., 2013) | `AGENTS.md` §4 | 2013 (reported) | 2026-11-24 | No public open-web ISBN record located. | `OWNER_SUPPLIED` (`UNVERIFIED`) | Display as `[PLACEHOLDER — Pending PNM/Author Bibliographic Check]`; verify zero identifiable patient EEG headers before any future upload. |
+| **PUB-004** | *Neuro-ophthalmology Made Easy* (Reported 1st electronic ed., 2020) | `https://www.scribd.com/document/833693458/Neuroophthalmology-9AA-Sunny` ; `AGENTS.md` §4 | 2020 (reported) | 2026-11-24 | Public document index references *Neuro-ophthalmology Made Easy* authored by Dr. Eow Gaik Bee and co-authors covering neurological localization, clinical cases, and quizzes. (Incidentally illustrates unauthorized third-party document-sharing risk that ContentVault mitigates.) | `PARTIALLY_VERIFIED` | Authorship and title corroborated; official eISBN, co-author list, and copyright page require primary confirmation. |
+| **PUB-005** | *Electrodiagnostic Medicine: A Case-Based Approach* (Reported 1st electronic ed., 2021) | `AGENTS.md` §4 | 2021 (reported) | 2026-11-24 | No open-web eISBN record located (distinct from Springer's 2021 *Electrodiagnostic Medicine: A Practical Approach* by Galvez-Jimenez et al.). | `OWNER_SUPPLIED` (`UNVERIFIED`) | Display with `[PLACEHOLDER — Pending Author eISBN & Co-author Confirmation]`. |
+| **PUB-006** | *Clinical Medicine At A Glance* | `https://www.researchgate.net/publication/370627687_Clinical_Medicine_At_A_Glance` | May 2023 (`2023-05-09`) | 2026-11-24 | Author-archived ResearchGate book record resolves bibliographic details previously missing in `AGENTS.md`: Authors `Gaik Bee Eow` (Penang General Hospital), `Muhammad Ihfaz Ismail` (Universiti Sains Malaysia), `Jafri Malin Abdullah` (Universiti Sains Malaysia); Publisher `Devine Love`; Date `May 2023`; **ISBN `978-629-97290-0-6`**. | `PARTIALLY_VERIFIED` | Resolves co-authors, May 2023 date, Malaysian publisher (`Devine Love`), and ISBN `978-629-97290-0-6`; confirm print/CIP page with authors for final `VERIFIED` sign-off. |
+| **PUB-007** | *We Are Our Best Doctors: Awaken the Healing Power Within Us* (English ed., 2021) | `https://www.electricsense.com/awaken-the-healing-power-within-you/` | July 2021 (`2021-07-23`) | 2026-11-24 | Public July 2021 interview announcement confirms publication of *We Are Our Best Doctors: Awaken The Healing Power Within Us* by Dr. Eow Gaik Bee (Penang General Hospital). | `PARTIALLY_VERIFIED` | Title, author, and 2021 release corroborated; ISBN and publisher imprint pending primary check. |
+| **PUB-008** | *We Are Our Best Doctors* (Mandarin ed., 2021) | `AGENTS.md` §4 | 2021 (reported) | 2026-11-24 | Mandarin edition reported by owner; official Chinese title and ISBN not indexed in open English web search. | `OWNER_SUPPLIED` (`UNVERIFIED`) | Obtain official Chinese title characters and ISBN from Dr. Eow; render Chinese subtitle as placeholder until confirmed. |
+| **PUB-009** | *Understanding Self Through KHTP and Childhood Memories* (Bilingual ed., 2021; reported eISBN `978-983-44306-6-5`) | `AGENTS.md` §4 (cross-checked with registrant prefix on `PUB-002`) | 2021 (reported) | 2026-11-24 | ISBN-13 checksum (`5`) is valid, and the Malaysian publisher registrant prefix `978-983-44306` matches the verified prefix on `PUB-002` (`978-983-44306-1-0`). | `OWNER_SUPPLIED` *(Prefix & checksum corroborated)* | Keep marked `OWNER_SUPPLIED` pending PNM e-depository lookup; frame KHTP strictly as non-diagnostic educational reflection (`AGENTS.md` §16). |
+| **PUB-010** | *Life Book: A Step-by-Step Guide to Breakthrough, Transformation and Awakening* (Bilingual ed.; reported ISBN `978-983-44306-8-9`) | `AGENTS.md` §4 (cross-checked with registrant prefix on `PUB-002`) | Unspecified | 2026-11-24 | ISBN-13 checksum (`9`) is valid, and registrant prefix `978-983-44306` matches `PUB-002`. | `OWNER_SUPPLIED` *(Prefix & checksum corroborated)* | Keep publication year & PNM confirmation marked as placeholder; distinguish clearly from Mindvalley's "Lifebook" brand. |
 
-## 3. Approved Repository Synthetic Assets
+---
 
-| Asset Path | Type | Status | Purpose |
-| --- | --- | --- | --- |
-| `knowledge/synthetic/synthetic-neurology-module.pdf` | 6-page A4 PDF | `VERIFIED` (Synthetic) | Exercises ContentVault upload, private storage, rasterisation, and per-learner pixel watermarking. |
-| `apps/contentvault-api/src/services/synthetic-audio.js` | Deterministic PCM WAV generator | `VERIFIED` (Synthetic) | Generates 5 chapter audio companions in `var/storage/private/` during `npm run seed`. |
+## 2. Verified Peer-Reviewed Journal Publications (Selected Primary Literature)
+
+| Finding ID | Citation | DOI / Official URL | Year | Status |
+| --- | --- | --- | --- | --- |
+| **JRN-001** | Chen CLH, Young SHY, ..., **Eow GB**, et al. *Chinese Medicine NeuroAiD Efficacy on Stroke Recovery: A Double-Blind, Placebo-Controlled, Randomized Study (CHIMES)*. Stroke 44(8):2093–2100. | `https://doi.org/10.1161/STROKEAHA.113.002055` | 2013 | `VERIFIED` |
+| **JRN-002** | Gopalai AA, Lim SY, ..., **Eow GB**, et al. *LRRK2 G2385R and R1628P Mutations Are Associated with an Increased Risk of Parkinson's Disease in the Malaysian Population*. BioMed Research International 2014:867321. | `https://doi.org/10.1155/2014/867321` | 2014 | `VERIFIED` |
+| **JRN-003** | Venketasubramanian N, ..., **Eow GB**, et al. *Chinese Medicine NeuroAiD Efficacy on Stroke Recovery-Extension Study (CHIMES-E)*. Cerebrovascular Diseases 39(5-6):309–318. | `https://scholar.google.com/citations?hl=en&user=VuihjIsAAAAJ` | 2015 | `VERIFIED` |
+| **JRN-004** | Hor JY, Lim TT, ..., **Eow GB**, et al. *Prevalence of neuromyelitis optica spectrum disorder in the multi-ethnic Penang Island, Malaysia, and a review of worldwide prevalence*. Multiple Sclerosis and Related Disorders 19:20–24. | `https://scholar.google.com/citations?hl=en&user=VuihjIsAAAAJ` | 2018 | `VERIFIED` |
+| **JRN-005** | Chan PY, Ripin ZM, Halim SA, Arifin WN, Yahya AS, **Eow GB**, et al. *Motion characteristics of subclinical tremors in Parkinson's disease and normal subjects*. Scientific Reports 12(1):4021. | `https://www.nature.com/articles/s41598-022-07980-4` | 2022 | `VERIFIED` |

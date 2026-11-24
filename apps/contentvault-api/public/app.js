@@ -19,6 +19,7 @@
       syntheticNotice:
         "STRATA ContentVault v0.1 — Uses synthetic demonstration content only. Server-side rasterisation & per-learner watermarking active.",
       brandSubtitle: "Medical AI Research Lab · Protected Education Engine",
+      portfolioNav: "M007 Portfolio",
       signOut: "Sign Out",
       heroEyebrow: "INTELLECTUAL PROPERTY DETERRENCE & TRACEABILITY",
       heroTitle: "Protected Clinical & Personal Development Learning",
@@ -129,6 +130,7 @@
       syntheticNotice:
         "STRATA ContentVault v0.1 — 仅使用合成演示资料。已启用服务端光栅化渲染与逐学员像素级水印保护。",
       brandSubtitle: "医学人工智能研究实验室 · 受保护数字教学引擎",
+      portfolioNav: "M007 专家档案原型",
       signOut: "退出登录",
       heroEyebrow: "知识产权威慑、溯源与访问控制",
       heroTitle: "受保护的临床医学与个人成长数字学习平台",

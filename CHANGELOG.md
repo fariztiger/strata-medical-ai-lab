@@ -2,6 +2,14 @@
 
 All notable changes to `strata-medical-ai-lab` are documented in this file.
 
+## [0.1.1] — 2026-11-24 (Four-Persona E2E Verification, Primary-Source M002/M003 Audit & M007 Portfolio Prototype)
+
+### Added
+- **Four-Persona End-to-End Test Suite (`apps/contentvault-api/tests/personas-e2e.test.js`):** Automated verification across `Admin`, `Student A (EN)`, `Student B (Mandarin 中文)`, and unauthorized `Student C` plus revocation/re-grant lifecycle and `/portfolio` routes (`26/26` total tests passing alongside `CV-001`..`CV-020`).
+- **Live Persona Visual Captures (`scripts/verification/capture_persona_views.py` & `reports/screenshots/01..05*.png`):** Generated live HTTP + server-rasterised watermarked PNG visual captures for all 4 personas and the M007 portfolio prototype.
+- **Primary-Source Verification (`M002` & `M003`):** Updated `research/professional-profile/PROFILE_VERIFICATION_REGISTER.md` (`PRF-001`..`PRF-010`) and `research/publications/ASSET_INVENTORY.md` (`PUB-001`..`PUB-010`, `JRN-001`..`JRN-005`) with official NSR `#126713`, MMC MeRITS, MSN 2017 guideline, peer-reviewed DOI, and bibliographic records verified on `2026-11-24`.
+- **M007 Professional Digital Portfolio Prototype (`apps/strata-website/public/`):** Private bilingual (`EN`/`中文`) speaker, author, and clinical educator prototype mounted at `/portfolio` with `X-Robots-Tag: noindex, nofollow, noarchive`, explicit `[PLACEHOLDER]` badges for unverified items, withheld portrait placeholder, and local-only SQLite enquiry staging (`POST /api/portfolio/enquiries`).
+
 ## [0.1.0] — 2026-11-24 (Mission 002-A: ContentVault Recovery & MVP Completion)
 
 ### Fixed (Recovery from `d0fc178` Baseline)

@@ -125,6 +125,17 @@ CREATE TABLE IF NOT EXISTS rate_limits (
   window_start TEXT NOT NULL,
   count        INTEGER NOT NULL
 );
+
+-- Local-only collaboration enquiry log for M007 prototype (never sent externally).
+CREATE TABLE IF NOT EXISTS portfolio_enquiries (
+  id           TEXT PRIMARY KEY,
+  created_at   TEXT NOT NULL,
+  sender_name  TEXT NOT NULL,
+  sender_org   TEXT,
+  sender_email TEXT NOT NULL,
+  topic        TEXT NOT NULL,
+  message      TEXT NOT NULL
+);
 `;
 
 export function getDb() {

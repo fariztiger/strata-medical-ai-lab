@@ -14,6 +14,8 @@ import {
   sendJson,
   sendError,
   sendBuffer,
+  readJson,
+  rateLimit,
   isSameOriginMutating,
   clientIp,
 } from "./http/helpers.js";
@@ -34,7 +36,9 @@ import {
   handleEngineSelftest,
 } from "./routes.js";
 import { audit } from "./security/audit.js";
-import { PUBLIC_DIR, ensureDirs } from "./config.js";
+import { newId } from "./security/crypto.js";
+import { getDb, nowIso } from "./db.js";
+import { PUBLIC_DIR, PORTFOLIO_PUBLIC_DIR, ensureDirs } from "./config.js";
 
 const STATIC_MIME = {
   ".html": "text/html; charset=utf-8",
@@ -45,10 +49,9 @@ const STATIC_MIME = {
   ".ico": "image/x-icon",
 };
 
-function serveStatic(pathname, res) {
-  if (!fs.existsSync(PUBLIC_DIR)) return false;
-
-  const targetRel = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
+function serveStaticFromRoot(rootDir, relPath, res) {
+  if (!fs.existsSync(rootDir)) return false;
+  const targetRel = relPath || "index.html";
   if (
     !targetRel ||
     targetRel.includes("..") ||
@@ -58,7 +61,7 @@ function serveStatic(pathname, res) {
     return false;
   }
 
-  const resolvedRoot = path.resolve(PUBLIC_DIR);
+  const resolvedRoot = path.resolve(rootDir);
   const resolvedFile = path.resolve(resolvedRoot, targetRel);
   if (
     resolvedFile !== path.join(resolvedRoot, targetRel) &&
@@ -78,9 +81,19 @@ function serveStatic(pathname, res) {
   const buf = fs.readFileSync(resolvedFile);
   sendBuffer(res, 200, buf, mime, {
     ...htmlSecurityHeaders(),
+    "X-Robots-Tag": "noindex, nofollow, noarchive",
     "Cache-Control": "no-cache",
   });
   return true;
+}
+
+function serveStatic(pathname, res) {
+  if (pathname === "/portfolio" || pathname.startsWith("/portfolio/")) {
+    const sub = pathname.replace(/^\/portfolio\/?/, "") || "index.html";
+    return serveStaticFromRoot(PORTFOLIO_PUBLIC_DIR, sub, res);
+  }
+  const targetRel = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
+  return serveStaticFromRoot(PUBLIC_DIR, targetRel, res);
 }
 
 export function createAppServer() {
@@ -257,6 +270,63 @@ export function createAppServer() {
       }
       if (pathname === "/api/admin/engine-selftest") {
         await handleEngineSelftest(req, res);
+        return;
+      }
+
+      // Local-only M007 Portfolio Collaboration Enquiry endpoint (no external send)
+      if (pathname === "/api/portfolio/enquiries") {
+        if (req.method !== "POST") {
+          res.setHeader("Allow", "POST");
+          sendError(res, 405, "method_not_allowed", "Allowed methods: POST.");
+          return;
+        }
+        const limiter = rateLimit(`enquiry:${clientIp(req)}`, 10, 60);
+        if (!limiter.allowed) {
+          sendError(res, 429, "rate_limited", "Too many enquiry submissions.");
+          return;
+        }
+        let body;
+        try {
+          body = await readJson(req);
+        } catch (error) {
+          sendError(res, error.statusCode || 400, "bad_request", error.message);
+          return;
+        }
+        const senderName = String(body.senderName || "").trim().slice(0, 120);
+        const senderOrg = String(body.senderOrg || "").trim().slice(0, 160) || null;
+        const senderEmail = String(body.senderEmail || "").trim().slice(0, 160);
+        const topic = String(body.topic || "speaking").trim().slice(0, 80);
+        const message = String(body.message || "").trim().slice(0, 2000);
+        if (!senderName || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(senderEmail) || message.length < 10) {
+          sendError(
+            res,
+            400,
+            "bad_request",
+            "Valid name, email address, and enquiry message (>= 10 chars) are required.",
+          );
+          return;
+        }
+        const id = newId("enq");
+        getDb()
+          .prepare(
+            `INSERT INTO portfolio_enquiries
+              (id, created_at, sender_name, sender_org, sender_email, topic, message)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(id, nowIso(), senderName, senderOrg, senderEmail, topic, message);
+        audit({
+          event: "portfolio.enquiry",
+          outcome: "info",
+          ip: clientIp(req),
+          detail: { enquiryId: id, topic },
+        });
+        sendJson(res, 201, {
+          ok: true,
+          enquiryId: id,
+          mode: "local_staging_only",
+          notice:
+            "Recorded locally in private prototype database only. No external email or communication was transmitted.",
+        });
         return;
       }
 
