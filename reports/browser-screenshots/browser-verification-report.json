@@ -1,5 +1,5 @@
 {
-  "executedAt": "2026-11-24T23:11:12.485Z",
+  "executedAt": "2026-11-24T23:29:41.232Z",
   "browserVersion": "157.0.8103.78",
   "pdfEngine": "pypdfium2",
   "viewportsTested": [
@@ -26,6 +26,7 @@
     "05-desktop-student-c-denied.png",
     "06a-desktop-reviewer-portal.png",
     "06-desktop-portfolio-zh.png",
+    "07a-mobile-student-a-canvas.png",
     "07-mobile-student-a-reader.png",
     "08-mobile-portfolio-en.png"
   ]
