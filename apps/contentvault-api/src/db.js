@@ -127,6 +127,15 @@ CREATE TABLE IF NOT EXISTS rate_limits (
   count        INTEGER NOT NULL
 );
 
+-- Shared & bounded fixed-window rate-limit buckets (Mission 004 Phase C).
+CREATE TABLE IF NOT EXISTS rate_limit_buckets (
+  bucket_key      TEXT PRIMARY KEY,
+  window_start_ms INTEGER NOT NULL,
+  expires_at_ms   INTEGER NOT NULL,
+  count           INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rate_limit_buckets_exp ON rate_limit_buckets(expires_at_ms);
+
 -- Single-use page token redemption ledger (SEC-005).
 CREATE TABLE IF NOT EXISTS token_redemptions (
   jti          TEXT PRIMARY KEY,

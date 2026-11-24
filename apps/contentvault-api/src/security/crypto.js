@@ -6,7 +6,7 @@
  */
 
 import crypto from "node:crypto";
-import { SIGNING_SECRET } from "../config.js";
+import { resolveSigningSecret, resolveVerificationSecrets } from "../config.js";
 
 const SCRYPT_PARAMS = { N: 16384, r: 8, p: 1, keylen: 64 };
 
@@ -53,11 +53,15 @@ function b64url(buf) {
   return Buffer.from(buf).toString("base64url");
 }
 
-function sign(payloadB64) {
+function signWithSecret(payloadB64, secret) {
   return crypto
-    .createHmac("sha256", SIGNING_SECRET)
+    .createHmac("sha256", secret)
     .update(payloadB64)
     .digest("base64url");
+}
+
+function sign(payloadB64) {
+  return signWithSecret(payloadB64, resolveSigningSecret());
 }
 
 /**
@@ -98,13 +102,20 @@ export function verifyToken(token, purpose) {
   if (!encoded || !provided) {
     throw new TokenError("malformed", "Token is malformed.");
   }
-  const expected = sign(encoded);
   const providedBuf = Buffer.from(provided, "utf8");
-  const expectedBuf = Buffer.from(expected, "utf8");
-  if (
-    providedBuf.length !== expectedBuf.length ||
-    !crypto.timingSafeEqual(providedBuf, expectedBuf)
-  ) {
+  const candidateSecrets = resolveVerificationSecrets();
+  let sigValid = false;
+  for (const secret of candidateSecrets) {
+    const expectedBuf = Buffer.from(signWithSecret(encoded, secret), "utf8");
+    if (
+      providedBuf.length === expectedBuf.length &&
+      crypto.timingSafeEqual(providedBuf, expectedBuf)
+    ) {
+      sigValid = true;
+      break;
+    }
+  }
+  if (!sigValid) {
     throw new TokenError("bad_signature", "Token signature is invalid.");
   }
   let body;

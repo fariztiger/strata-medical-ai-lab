@@ -123,6 +123,20 @@
       audioReady: "Authenticated chapter audio ready.",
       revokeBtn: "Revoke",
       regrantBtn: "Re-grant",
+      reviewerEyebrow: "AUTHORIZED REVIEWER PORTAL · LEAST-PRIVILEGE SESSION",
+      reviewerHeading: "M007 Private Specialist Collaboration Review",
+      reviewerLead:
+        "Your reviewer session is scoped strictly to the private, non-indexed M007 Specialist Collaboration & Public Education Portfolio prototype. In accordance with STRATA least-privilege governance, reviewer accounts hold zero access to learner curriculum files, raw PDFs, or administrator controls.",
+      reviewerScope1Title: "Authorized M007 Access",
+      reviewerScope1Body:
+        "Inspect primary-source verification badges (VERIFIED vs PARTIALLY VERIFIED), bilingual EN/中文 copy, and local-only enquiry capture.",
+      reviewerScope2Title: "Non-Indexed & Private",
+      reviewerScope2Body:
+        "Protected by server-side session checks, X-Robots-Tag noindex headers, and strict no-store cache directives.",
+      reviewerScope3Title: "Zero Learner Data Exposure",
+      reviewerScope3Body:
+        "Student entitlements, watermarked learning modules, and administrative audit APIs remain isolated.",
+      reviewerOpenPortfolioBtn: "Open Private M007 Portfolio →",
     },
     zh: {
       skipToContent: "跳转至主要内容",
@@ -230,6 +244,20 @@
       audioReady: "已通过权限校验，可播放章节导学音频。",
       revokeBtn: "撤销权限",
       regrantBtn: "重新授权",
+      reviewerEyebrow: "授权审阅人门户 · 最小权限会话",
+      reviewerHeading: "M007 私有专科协作与公众科普档案审阅",
+      reviewerLead:
+        "您的审阅人会话仅限访问非公开、禁止搜索引擎收录的 M007 专科协作与公众教育档案原型。依据 STRATA 最小权限治理原则，审阅人账户不具备学员课程库、原始 PDF 或管理员控制台访问权限。",
+      reviewerScope1Title: "M007 授权审阅范围",
+      reviewerScope1Body:
+        "审阅一手来源核验标签（已核实 / 部分核实）、中英双语内容及仅限本地存储的协作咨询记录。",
+      reviewerScope2Title: "私有保护与禁止收录",
+      reviewerScope2Body:
+        "受服务端会话鉴权、X-Robots-Tag noindex 响应头及严格的 no-store 缓存策略保护。",
+      reviewerScope3Title: "零学员数据暴露",
+      reviewerScope3Body:
+        "学员授权记录、带水印教学页面及管理员审计接口均保持严格隔离。",
+      reviewerOpenPortfolioBtn: "进入 M007 私有专家档案 →",
     },
   };
 
@@ -379,6 +407,7 @@
 
     if (!currentUser) {
       $("view-student").classList.add("hidden");
+      $("view-reviewer")?.classList.add("hidden");
       $("view-admin").classList.add("hidden");
       return;
     }
@@ -392,10 +421,16 @@
 
     if (currentUser.role === "admin") {
       $("view-student").classList.add("hidden");
+      $("view-reviewer")?.classList.add("hidden");
       $("view-admin").classList.remove("hidden");
       refreshAdminConsole();
+    } else if (currentUser.role === "reviewer") {
+      $("view-admin").classList.add("hidden");
+      $("view-student").classList.add("hidden");
+      $("view-reviewer")?.classList.remove("hidden");
     } else {
       $("view-admin").classList.add("hidden");
+      $("view-reviewer")?.classList.add("hidden");
       $("view-student").classList.remove("hidden");
       updateWatermarkBanner();
       showStudentTab("library");

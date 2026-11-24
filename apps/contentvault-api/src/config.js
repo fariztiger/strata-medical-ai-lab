@@ -84,23 +84,75 @@ export function getTrustedProxies() {
 }
 
 /**
- * Signing secret for session and token signatures.
+ * Compute Shannon entropy in bits per character.
+ */
+export function shannonEntropyBitsPerChar(secret) {
+  const str = String(secret || "");
+  if (!str.length) return 0;
+  const freq = new Map();
+  for (const ch of str) {
+    freq.set(ch, (freq.get(ch) || 0) + 1);
+  }
+  let entropy = 0;
+  for (const count of freq.values()) {
+    const p = count / str.length;
+    entropy -= p * Math.log2(p);
+  }
+  return entropy;
+}
+
+function readSecretFromFileIfConfigured() {
+  const secretFile = String(process.env.CV_SIGNING_SECRET_FILE || "").trim();
+  if (!secretFile) return "";
+  if (!fs.existsSync(secretFile)) {
+    throw new Error(`CV_SIGNING_SECRET_FILE does not exist: ${secretFile}`);
+  }
+  if (isProduction() && process.platform !== "win32") {
+    const mode = fs.statSync(secretFile).mode & 0o777;
+    if ((mode & 0o077) !== 0) {
+      throw new Error(
+        `SEC-002 violation: CV_SIGNING_SECRET_FILE permissions (${mode.toString(8)}) are too open; expected 0600 or 0400 in production.`,
+      );
+    }
+  }
+  return fs.readFileSync(secretFile, "utf8").trim();
+}
+
+function assertSecretQuality(secret, label = "CV_SIGNING_SECRET") {
+  if (secret.length < 32) {
+    throw new Error(`${label} must be at least 32 characters long.`);
+  }
+  if (isProduction()) {
+    const distinctChars = new Set(secret).size;
+    const entropy = shannonEntropyBitsPerChar(secret);
+    if (distinctChars < 12 || entropy < 3.5) {
+      throw new Error(
+        `SEC-002 violation: ${label} lacks sufficient cryptographic entropy (${entropy.toFixed(2)} bits/char, ${distinctChars} unique chars). Generate with 'openssl rand -hex 48'.`,
+      );
+    }
+  }
+}
+
+/**
+ * Signing secret for session and token signatures (Mission 004 Phase C).
  *
- * In development a local secret file is generated so the project runs without
- * manual setup. In production (NODE_ENV=production) a real CV_SIGNING_SECRET is
- * mandatory and the server refuses to start without it.
+ * Supports `CV_SIGNING_SECRET_FILE` (container/systemd secret mount) or
+ * `CV_SIGNING_SECRET`, enforces cryptographic entropy in production, and
+ * supports optional `CV_SIGNING_SECRET_PREVIOUS` for zero-downtime rotation.
  */
 export function resolveSigningSecret() {
-  const fromEnv = process.env.CV_SIGNING_SECRET;
-  if (fromEnv && fromEnv.length >= 32) return fromEnv;
+  const fromFile = readSecretFromFileIfConfigured();
+  const candidate = fromFile || String(process.env.CV_SIGNING_SECRET || "");
+
+  if (candidate) {
+    assertSecretQuality(candidate, fromFile ? "CV_SIGNING_SECRET_FILE" : "CV_SIGNING_SECRET");
+    return candidate;
+  }
 
   if (isProduction()) {
     throw new Error(
-      "CV_SIGNING_SECRET (>=32 chars) is required when NODE_ENV=production.",
+      "CV_SIGNING_SECRET or CV_SIGNING_SECRET_FILE (>=32 high-entropy chars) is required when NODE_ENV=production.",
     );
-  }
-  if (fromEnv) {
-    throw new Error("CV_SIGNING_SECRET must be at least 32 characters long.");
   }
 
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -113,15 +165,26 @@ export function resolveSigningSecret() {
   return generated;
 }
 
+export function resolveVerificationSecrets() {
+  const primary = resolveSigningSecret();
+  const previous = String(process.env.CV_SIGNING_SECRET_PREVIOUS || "").trim();
+  if (!previous) return [primary];
+  assertSecretQuality(previous, "CV_SIGNING_SECRET_PREVIOUS");
+  return previous === primary ? [primary] : [primary, previous];
+}
+
 export const SIGNING_SECRET = resolveSigningSecret();
 
 /** Session rolling idle lifetime (minutes) and absolute max lifetime (hours). */
 export const SESSION_IDLE_MINUTES = Number(process.env.CV_SESSION_IDLE_MINUTES || 120);
 export const SESSION_MAX_HOURS = Number(process.env.CV_SESSION_MAX_HOURS || 12);
 
-/** Login rate-limiting thresholds (SEC-003). */
+/** Shared & bounded rate-limiting + lockout DoS mitigation thresholds (SEC-003 / Phase C). */
+export const RATE_LIMIT_MAX_BUCKETS = Number(process.env.CV_RATE_LIMIT_MAX_BUCKETS || 10_000);
 export const LOGIN_IP_LIMIT_PER_MINUTE = Number(process.env.CV_LOGIN_IP_LIMIT || 25);
+export const LOGIN_PAIR_FAIL_LIMIT = Number(process.env.CV_LOGIN_PAIR_FAIL_LIMIT || 5);
 export const LOGIN_ACCOUNT_FAIL_LIMIT = Number(process.env.CV_LOGIN_ACCOUNT_FAIL_LIMIT || 8);
+export const LOGIN_GLOBAL_CPU_CEILING = Number(process.env.CV_LOGIN_GLOBAL_CPU_CEILING || 30);
 export const LOGIN_ACCOUNT_WINDOW_SECONDS = Number(process.env.CV_LOGIN_ACCOUNT_WINDOW_SECONDS || 300);
 
 /**

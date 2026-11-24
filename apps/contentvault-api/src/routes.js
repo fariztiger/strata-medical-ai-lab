@@ -78,7 +78,9 @@ import {
   AUDIO_TOKEN_TTL_SECONDS,
   SESSION_IDLE_MINUTES,
   LOGIN_IP_LIMIT_PER_MINUTE,
+  LOGIN_PAIR_FAIL_LIMIT,
   LOGIN_ACCOUNT_FAIL_LIMIT,
+  LOGIN_GLOBAL_CPU_CEILING,
   LOGIN_ACCOUNT_WINDOW_SECONDS,
   MAX_UPLOAD_BYTES,
   MAX_PDF_PAGES,
@@ -257,12 +259,12 @@ async function handleAuth(req, res) {
   return notFound(res);
 }
 
-const DEMO_PERSONA_EMAILS = {
+const DEMO_PERSONA_EMAILS = Object.assign(Object.create(null), {
   admin: "admin@strata.local",
   studentA: "aisyah@student.strata.local",
   studentB: "weiming@student.strata.local",
   studentC: "priya@student.strata.local",
-};
+});
 
 function issueSessionResponse(req, res, session) {
   const idleSeconds = SESSION_IDLE_MINUTES * 60;
@@ -419,14 +421,74 @@ async function handleLogin(req, res) {
   }
 
   const normalizedEmail = body.email.trim().toLowerCase().slice(0, 180);
+  const pairKey = `login:pair:${meta.ip}:${normalizedEmail}`;
   const acctKey = `login:acct:${normalizedEmail}`;
+  const cpuKey = `login:acct-cpu:${normalizedEmail}`;
+
+  // 1. Per-(IP, Account) pair throttle blocks single-source brute force without
+  //    locking out the legitimate account owner signing in from a clean network.
+  const pairStatus = rateLimit(
+    pairKey,
+    LOGIN_PAIR_FAIL_LIMIT,
+    LOGIN_ACCOUNT_WINDOW_SECONDS,
+    { increment: false },
+  );
+  if (!pairStatus.allowed) {
+    audit({
+      event: "auth.login",
+      outcome: "deny",
+      ip: meta.ip,
+      userAgent: meta.userAgent,
+      detail: { reason: "ip_account_pair_throttled", email: normalizedEmail },
+    });
+    res.setHeader("Retry-After", String(pairStatus.retryAfter || LOGIN_ACCOUNT_WINDOW_SECONDS));
+    return sendError(
+      res,
+      429,
+      "rate_limited",
+      "Too many failed sign-in attempts from this network for this account.",
+      { retryAfter: pairStatus.retryAfter },
+    );
+  }
+
+  // 2. Hard global scrypt CPU ceiling per account protects worker CPU against huge botnets.
+  const cpuStatus = rateLimit(
+    cpuKey,
+    LOGIN_GLOBAL_CPU_CEILING,
+    LOGIN_ACCOUNT_WINDOW_SECONDS,
+    { increment: true },
+  );
+  if (!cpuStatus.allowed) {
+    audit({
+      event: "auth.login",
+      outcome: "deny",
+      ip: meta.ip,
+      userAgent: meta.userAgent,
+      detail: { reason: "account_cpu_ceiling", email: normalizedEmail },
+    });
+    res.setHeader("Retry-After", String(cpuStatus.retryAfter || LOGIN_ACCOUNT_WINDOW_SECONDS));
+    return sendError(
+      res,
+      429,
+      "rate_limited",
+      "Account sign-in capacity temporarily saturated; please retry shortly.",
+      { retryAfter: cpuStatus.retryAfter },
+    );
+  }
+
+  // 3. Distributed account velocity check:
+  //    - If global failed attempts exceed LOGIN_ACCOUNT_FAIL_LIMIT AND this IP already
+  //      failed at least once (`pairStatus.count > 0`), reject immediately with 429.
+  //    - If this IP has zero prior failures (`pairStatus.count === 0`), verify password
+  //      so the legitimate user is NOT DoS-locked out by third-party spray attacks,
+  //      while returning 429 immediately if the password from the new IP is also wrong!
   const acctStatus = rateLimit(
     acctKey,
     LOGIN_ACCOUNT_FAIL_LIMIT,
     LOGIN_ACCOUNT_WINDOW_SECONDS,
     { increment: false },
   );
-  if (!acctStatus.allowed) {
+  if (!acctStatus.allowed && pairStatus.count > 0) {
     audit({
       event: "auth.login",
       outcome: "deny",
@@ -459,13 +521,41 @@ async function handleLogin(req, res) {
   }
 
   if (!session) {
-    rateLimit(acctKey, LOGIN_ACCOUNT_FAIL_LIMIT, LOGIN_ACCOUNT_WINDOW_SECONDS, {
+    rateLimit(pairKey, LOGIN_PAIR_FAIL_LIMIT, LOGIN_ACCOUNT_WINDOW_SECONDS, {
       increment: true,
     });
+    const updatedAcct = rateLimit(
+      acctKey,
+      LOGIN_ACCOUNT_FAIL_LIMIT,
+      LOGIN_ACCOUNT_WINDOW_SECONDS,
+      { increment: true },
+    );
+    if (!acctStatus.allowed || !updatedAcct.allowed && updatedAcct.count > LOGIN_ACCOUNT_FAIL_LIMIT) {
+      audit({
+        event: "auth.login",
+        outcome: "deny",
+        ip: meta.ip,
+        userAgent: meta.userAgent,
+        detail: { reason: "account_throttled", email: normalizedEmail },
+      });
+      res.setHeader(
+        "Retry-After",
+        String(updatedAcct.retryAfter || acctStatus.retryAfter || LOGIN_ACCOUNT_WINDOW_SECONDS),
+      );
+      return sendError(
+        res,
+        429,
+        "rate_limited",
+        "Account temporarily throttled due to repeated failed sign-in attempts.",
+        { retryAfter: updatedAcct.retryAfter || LOGIN_ACCOUNT_WINDOW_SECONDS },
+      );
+    }
     return sendError(res, 401, "invalid_credentials", "Email or password is incorrect.");
   }
 
-  clearRateLimit(acctKey);
+  // Clear ONLY this legitimate caller's (IP, Account) pair counter — never clear
+  // global/other-IP lockout counters so an active distributed attacker stays throttled.
+  clearRateLimit(pairKey);
   return issueSessionResponse(req, res, session);
 }
 

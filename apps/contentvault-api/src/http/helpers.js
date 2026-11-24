@@ -5,7 +5,13 @@
 
 import crypto from "node:crypto";
 import net from "node:net";
-import { getTrustedProxies, isFrameEmbedAllowed } from "../config.js";
+import {
+  getTrustedProxies,
+  isFrameEmbedAllowed,
+  RATE_LIMIT_MAX_BUCKETS,
+} from "../config.js";
+import { getDb } from "../db.js";
+import { sharedSqliteRateLimit } from "../persistence/adapter.js";
 
 export const MAX_JSON_BYTES = 1024 * 256;
 
@@ -293,40 +299,24 @@ export function isSecureRequest(req) {
   return false;
 }
 
-const buckets = new Map();
-
 /**
- * Fixed-window rate limiter supporting read-only inspection (`increment = false`)
- * and explicit key clearing (used for per-account failed-login throttling).
+ * Shared & strictly bounded fixed-window rate limiter backed by SQLite
+ * (`rate_limit_buckets`) locally and `PostgresPersistenceAdapter` in multi-replica
+ * deployments. Caps active buckets at `RATE_LIMIT_MAX_BUCKETS` (default 10,000)
+ * with oldest-expiry eviction so key-spray attacks cannot exhaust memory/disk.
  */
 export function rateLimit(key, limit, windowSeconds, options = {}) {
-  const increment = options.increment !== false;
-  const now = Date.now();
-  const windowMs = windowSeconds * 1000;
-  const bucket = buckets.get(key);
-
-  if (!bucket || now - bucket.start >= windowMs) {
-    if (!increment) {
-      return { allowed: true, count: 0, remaining: limit };
-    }
-    buckets.set(key, { start: now, count: 1 });
-    return { allowed: true, count: 1, remaining: Math.max(0, limit - 1) };
-  }
-
-  const nextCount = increment ? bucket.count + 1 : bucket.count;
-  if (increment) {
-    bucket.count = nextCount;
-  }
-
-  if (nextCount > limit || (!increment && nextCount >= limit)) {
-    const retryAfter = Math.max(1, Math.ceil((windowMs - (now - bucket.start)) / 1000));
-    return { allowed: false, count: nextCount, remaining: 0, retryAfter };
-  }
-  return { allowed: true, count: nextCount, remaining: Math.max(0, limit - nextCount) };
+  const maxBuckets = Number(options.maxBuckets || RATE_LIMIT_MAX_BUCKETS);
+  return sharedSqliteRateLimit(getDb(), key, limit, windowSeconds, {
+    increment: options.increment !== false,
+    maxBuckets,
+  });
 }
 
 export function clearRateLimit(key) {
-  buckets.delete(key);
+  getDb()
+    .prepare("DELETE FROM rate_limit_buckets WHERE bucket_key = ?")
+    .run(String(key || "").slice(0, 256));
 }
 
 /** CSRF-style protection: mutating requests must match Host (honoring X-Forwarded-Host ONLY from trusted proxies). */

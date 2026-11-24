@@ -98,9 +98,18 @@ async function waitForHealth(timeoutMs = 15_000) {
 let browser;
 try {
   await waitForHealth();
+  const executableCandidates = [
+    process.env.CV_CHROMIUM_EXECUTABLE,
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+  ].filter(Boolean);
+  const existingExe = executableCandidates.find((p) => fs.existsSync(p));
   browser = await playwrightPkg.chromium.launch({
     headless: true,
-    args: ["--autoplay-policy=no-user-gesture-required"],
+    ...(existingExe ? { executablePath: existingExe } : {}),
+    args: ["--no-sandbox", "--disable-setuid-sandbox", "--autoplay-policy=no-user-gesture-required"],
   });
 } catch (err) {
   server.kill("SIGTERM");
@@ -346,8 +355,15 @@ try {
   await revPage.fill("#login-email", "reviewer@strata.test");
   await revPage.fill("#login-password", "SyntheticReviewer#2026!");
   await revPage.click("#btn-login-submit");
+  await revPage.waitForSelector("#view-reviewer:not(.hidden)");
   await revPage.waitForSelector("#header-portfolio-link:not(.hidden)");
-  await revPage.click("#header-portfolio-link");
+  await assertNoHorizontalOverflow(revPage, "desktop-reviewer-portal");
+
+  const s6a = "06a-desktop-reviewer-portal.png";
+  await revPage.screenshot({ path: path.join(SCREENSHOT_DIR, s6a), fullPage: false });
+  report.screenshots.push(s6a);
+
+  await revPage.click("#btn-reviewer-open-portfolio");
   await revPage.waitForSelector("#pf-enq-form");
   await assertNoHorizontalOverflow(revPage, "desktop-portfolio-en");
 
