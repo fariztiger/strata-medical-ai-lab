@@ -13,11 +13,24 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 ENGINE = REPO / "packages" / "watermark-engine" / "render_page.py"
 sys.path.insert(0, str(REPO / "vendor" / "pylibs"))
+for venv_site in (REPO / ".venv").glob("lib/python*/site-packages"):
+    sys.path.insert(0, str(venv_site))
+win_site = REPO / ".venv" / "Lib" / "site-packages"
+if win_site.is_dir():
+    sys.path.insert(0, str(win_site))
+
+VENV_PY_POSIX = REPO / ".venv" / "bin" / "python"
+VENV_PY_WIN = REPO / ".venv" / "Scripts" / "python.exe"
+PYTHON_EXEC = (
+    str(VENV_PY_POSIX)
+    if VENV_PY_POSIX.is_file()
+    else (str(VENV_PY_WIN) if VENV_PY_WIN.is_file() else sys.executable)
+)
 
 
 def run(request: dict) -> dict:
     proc = subprocess.run(
-        [sys.executable, str(ENGINE)],
+        [PYTHON_EXEC, str(ENGINE)],
         input=json.dumps(request),
         capture_output=True,
         text=True,
