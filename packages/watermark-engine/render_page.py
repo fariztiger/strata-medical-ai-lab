@@ -1,47 +1,48 @@
 #!/usr/bin/env python3
 """
-STRATA ContentVault watermark engine (Hardened — Mission 003-A: SEC-004 & SEC-005).
+STRATA ContentVault watermark & rasterisation worker (Mission 004 Phase A).
 
-Rasterises a page of a private PDF and burns a per-student watermark into the
-pixel data. Invoked by the trusted Node API with a JSON request on stdin and a
-JSON response on stdout. No shell interpolation of paths or identifiers.
+Uses a pluggable `PdfRasterAdapter` (`pypdfium2` by default, `pymupdf` optional
+via `CV_PDF_ENGINE` or request `engine`) so PDF rasterisation can be swapped
+without touching authorization, entitlement management, storage, or frontend UI.
 
 Security & Internationalisation Properties
 ------------------------------------------
 1. Burned-in RGBA pixel compositing (no removable CSS/DOM overlay — CV-019).
-2. Deterministic pan-Unicode & Mandarin (CJK) glyph rendering on minimal Linux
-   containers via PyMuPDF's embedded Apache-2.0 Droid Sans Fallback TrueType
-   buffer (`pymupdf.Font("china-ss").buffer`) when no OS CJK font is installed
-   (SEC-004).
-3. Multi-chromatic + achromatic neutral tiling (`+28 deg` primary staggered grid
-   cycling Neutral Slate, Cool Teal-Navy, and Champagne Ochre + `-26 deg`
-   content-intersecting neutral trace + edge stamp) to resist simple single-hue,
-   channel-difference, and saturation threshold filters while keeping clinical
-   typography legible (SEC-005).
+2. Deterministic pan-Unicode & Mandarin (CJK) glyph rendering without AGPL
+   font extraction, resolving in order:
+   - explicit `CV_WATERMARK_FONT_PATH`,
+   - repo-local `vendor/fonts/wqy-microhei/wqy-microhei.ttc` (WenQuanYi Micro Hei,
+     elected under Apache-2.0 and SHA-256 verified during setup),
+   - installed OS Noto CJK / WenQuanYi / DejaVu TrueType/OpenType fonts.
+3. Multi-chromatic + achromatic neutral tiling (`+28 deg` staggered grid cycling
+   Neutral Slate, Cool Teal-Navy, and Champagne Ochre + `-26 deg` content-
+   intersecting trace + bottom edge stamp) to resist simple color scrubbing (SEC-005).
 """
 
 from __future__ import annotations
 
 import base64
-import functools
 import hashlib
 import io
 import json
 import os
+from pathlib import Path
 import sys
 import time
 
-try:
-    import pymupdf  # PyMuPDF >= 1.24 exposes the canonical module name
-except ImportError:  # pragma: no cover
-    import fitz as pymupdf  # type: ignore
-
 from PIL import Image, ImageDraw, ImageFont
+
+ENGINE_DIR = Path(__file__).resolve().parent
+REPO_ROOT = ENGINE_DIR.parent.parent
+if str(ENGINE_DIR) not in sys.path:
+    sys.path.insert(0, str(ENGINE_DIR))
+
+from adapters import PdfEngineError, get_pdf_adapter  # noqa: E402
 
 MAX_DIMENSION = 2600
 
 # SEC-005: Three orthogonal ink channels (Achromatic Slate, Cool Teal-Navy, Warm Ochre)
-# prevent single-color or R-B / saturation filters from stripping the watermark.
 TILE_PALETTE = (
     (56, 60, 64, 72),    # Neutral Slate (achromatic: R ~= G ~= B)
     (24, 76, 92, 74),    # Cool Deep Teal-Navy (B > R)
@@ -51,6 +52,8 @@ CROSS_TRACE_RGBA = (62, 66, 72, 46)
 INK_EDGE = (46, 54, 64)
 EDGE_OPACITY = 152
 
+VENDOR_WQY_FONT = REPO_ROOT / "vendor" / "fonts" / "wqy-microhei" / "wqy-microhei.ttc"
+
 
 def fail(code: str, message: str) -> None:
     """Emit a structured error and exit non-zero. Never leak a stack trace."""
@@ -58,40 +61,18 @@ def fail(code: str, message: str) -> None:
     raise SystemExit(2)
 
 
-@functools.lru_cache(maxsize=1)
-def _embedded_cjk_ttf_bytes() -> bytes | None:
-    """
-    Extract the Apache-2.0 licensed Droid Sans Fallback Regular TrueType font
-    compiled into PyMuPDF (`china-ss`) so Mandarin, Japanese, Korean, and
-    extended Unicode names render deterministically on minimal Linux systems.
-    """
-    try:
-        font_obj = pymupdf.Font("china-ss")
-        buf = bytes(font_obj.buffer)
-        return buf if len(buf) > 1024 else None
-    except Exception:
-        return None
-
-
-def load_font(size: int, text: str = "") -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    """
-    Resolve a TrueType/OpenType font capable of rendering `text`:
-    1. Explicit `CV_WATERMARK_FONT_PATH` if configured.
-    2. Installed OS CJK or Latin TrueType fonts when appropriate.
-    3. Embedded PyMuPDF `china-ss` (Droid Sans Fallback Regular, Apache-2.0) for
-       guaranteed CJK/Unicode coverage on minimal Linux containers (SEC-004).
-    """
+def resolve_font_info(text: str = "") -> tuple[str, str | None]:
+    """Return `(source_kind, filesystem_path)` for diagnostics and font loading."""
     custom_font = os.environ.get("CV_WATERMARK_FONT_PATH", "").strip()
     if custom_font and os.path.isfile(custom_font):
-        try:
-            return ImageFont.truetype(custom_font, size)
-        except OSError:
-            pass
+        return ("env:CV_WATERMARK_FONT_PATH", custom_font)
 
     needs_non_ascii = any(ord(ch) > 0x024F for ch in text)
     cjk_candidates = [
+        str(VENDOR_WQY_FONT),
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
         "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
         r"C:\Windows\Fonts\msyh.ttc",
         r"C:\Windows\Fonts\simhei.ttf",
@@ -99,40 +80,28 @@ def load_font(size: int, text: str = "") -> ImageFont.FreeTypeFont | ImageFont.I
     ]
     latin_candidates = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        str(VENDOR_WQY_FONT),
         r"C:\Windows\Fonts\segoeui.ttf",
         r"C:\Windows\Fonts\arial.ttf",
         r"C:\Windows\Fonts\calibri.ttf",
         "/System/Library/Fonts/Supplemental/Arial.ttf",
     ]
 
-    if needs_non_ascii:
-        for path in cjk_candidates:
-            if os.path.isfile(path):
-                try:
-                    return ImageFont.truetype(path, size)
-                except OSError:
-                    continue
-        embedded = _embedded_cjk_ttf_bytes()
-        if embedded:
-            try:
-                return ImageFont.truetype(io.BytesIO(embedded), size)
-            except OSError:
-                pass
+    ordered = cjk_candidates + latin_candidates if needs_non_ascii else latin_candidates + cjk_candidates
+    for candidate in ordered:
+        if os.path.isfile(candidate):
+            return ("file", candidate)
+    return ("pillow_default", None)
 
-    for path in latin_candidates + cjk_candidates:
-        if os.path.isfile(path):
-            try:
-                return ImageFont.truetype(path, size)
-            except OSError:
-                continue
 
-    embedded = _embedded_cjk_ttf_bytes()
-    if embedded:
+def load_font(size: int, text: str = "") -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    """Resolve an Apache-2.0 / OFL / OS TrueType/OpenType font without AGPL dependencies."""
+    _, font_path = resolve_font_info(text)
+    if font_path:
         try:
-            return ImageFont.truetype(io.BytesIO(embedded), size)
+            return ImageFont.truetype(font_path, size)
         except OSError:
             pass
-
     return ImageFont.load_default()
 
 
@@ -142,34 +111,19 @@ def sanitize_unicode_field(raw: object, max_len: int) -> str:
     return text.strip()[:max_len]
 
 
-def probe(path: str) -> dict:
-    if not os.path.isfile(path):
-        fail("missing_file", "PDF file not found.")
-    try:
-        doc = pymupdf.open(path)
-    except Exception as error:
-        fail("unreadable", f"Could not open PDF: {type(error).__name__}")
-    try:
-        if doc.needs_pass:
-            fail("encrypted", "PDF is password protected.")
-        if doc.page_count < 1:
-            fail("empty", "PDF has no pages.")
-        first = doc[0].rect
-        return {
-            "ok": True,
-            "pageCount": doc.page_count,
-            "pageWidth": round(first.width, 2),
-            "pageHeight": round(first.height, 2),
-        }
-    finally:
-        doc.close()
+def probe(path: str, engine_name: str | None = None) -> dict:
+    adapter = get_pdf_adapter(engine_name)
+    info = adapter.probe(path)
+    return {
+        "ok": True,
+        "engine": info.engine,
+        "pageCount": info.page_count,
+        "pageWidth": info.page_width,
+        "pageHeight": info.page_height,
+    }
 
 
 def watermark_text(identity: dict, page_number: int, total: int) -> str:
-    """
-    Build the mark from server-supplied fields only, preserving full Unicode
-    names (Mandarin, Malay, Tamil, accented Latin, mixed-script — SEC-004).
-    """
     label = sanitize_unicode_field(identity.get("label"), 60) or "Authorized Learner"
     ref = sanitize_unicode_field(identity.get("ref"), 40)
     stamp = sanitize_unicode_field(identity.get("stamp"), 32)
@@ -184,10 +138,6 @@ def apply_watermark(
     total: int,
     short_ref: str = "",
 ) -> Image.Image:
-    """
-    Composite a multi-chromatic + neutral diagonal staggered grid, counter-angled
-    central trace, and bottom forensic edge stamp directly into the page pixels.
-    """
     base = image.convert("RGBA")
     width, height = base.size
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
@@ -203,7 +153,6 @@ def apply_watermark(
     step_x = max(text_w + int(width * 0.04) + 16, int(width / 3.1))
     step_y = max(text_h + int(height * 0.055) + 18, int(height / 8.5))
 
-    # Pre-render one rotated tile for each of the 3 orthogonal ink profiles (SEC-005).
     palette_tiles: list[Image.Image] = []
     for rgba in TILE_PALETTE:
         tile = Image.new("RGBA", (step_x, step_y), (0, 0, 0, 0))
@@ -217,8 +166,6 @@ def apply_watermark(
             chosen_tile = palette_tiles[(row + col) % len(palette_tiles)]
             overlay.alpha_composite(chosen_tile, (x, y))
 
-    # Secondary counter-angled (-26 deg) achromatic trace across body-text zones
-    # so intersections with dark glyphs survive aggressive background bleaching.
     trace_label = f"{short_ref or mark[:28]} · p.{page_number}/{total}"
     trace_size = max(10, int(min(width, height) / 48))
     trace_font = load_font(trace_size, trace_label)
@@ -232,7 +179,6 @@ def apply_watermark(
         for band_x in (int(width * 0.16), int(width * 0.54)):
             overlay.alpha_composite(trace_rot, (band_x, band_y))
 
-    # Bottom forensic edge stamp in neutral slate.
     edge_size = max(10, int(min(width, height) / 60))
     edge_font = load_font(edge_size, mark)
     edge_mark = f"STRATA ContentVault · {mark}"
@@ -259,111 +205,120 @@ def render(
     with_watermark: bool = True,
     cache_dir: str | None = None,
     content_hash: str | None = None,
+    engine_name: str | None = None,
 ) -> dict:
     if not os.path.isfile(path):
         fail("missing_file", "PDF file not found.")
 
     started = time.perf_counter()
-    try:
-        doc = pymupdf.open(path)
-    except Exception as error:
-        fail("unreadable", f"Could not open PDF: {type(error).__name__}")
+    adapter = get_pdf_adapter(engine_name)
 
-    try:
-        total = doc.page_count
+    cache_hit = False
+    cache_file = None
+    image: Image.Image | None = None
+    total = 0
+
+    if cache_dir:
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            with open(path, "rb") as pdf_fh:
+                doc_digest = content_hash or hashlib.sha256(pdf_fh.read()).hexdigest()
+            key_raw = f"{doc_digest}:{adapter.engine_id}:p{page_number}:dpi{dpi}:max{max_dimension}:v2"
+            cache_key = hashlib.sha256(key_raw.encode("utf-8")).hexdigest()
+            cache_file = os.path.join(cache_dir, f"base_{cache_key}.png")
+        except OSError:
+            cache_file = None
+
+    if cache_file and os.path.isfile(cache_file):
+        info = adapter.probe(path)
+        total = info.page_count
         if page_number < 1 or page_number > total:
             fail("bad_page", f"Page {page_number} is outside 1..{total}.")
+        try:
+            with Image.open(cache_file) as cached_img:
+                image = cached_img.convert("RGB")
+            cache_hit = True
+        except Exception:
+            image = None
 
-        cache_hit = False
-        cache_file = None
-        if cache_dir:
+    if image is None:
+        raster = adapter.rasterize_page(path, page_number, dpi, max_dimension)
+        image = raster.image
+        total = raster.page_count
+
+        if cache_file:
+            tmp_cache = f"{cache_file}.{os.getpid()}.tmp"
             try:
-                os.makedirs(cache_dir, exist_ok=True)
-                doc_digest = content_hash or hashlib.sha256(open(path, "rb").read()).hexdigest()
-                key_raw = f"{doc_digest}:p{page_number}:dpi{dpi}:max{max_dimension}:v1"
-                cache_key = hashlib.sha256(key_raw.encode("utf-8")).hexdigest()
-                cache_file = os.path.join(cache_dir, f"base_{cache_key}.png")
-            except OSError:
-                cache_file = None
-
-        image: Image.Image | None = None
-        if cache_file and os.path.isfile(cache_file):
-            try:
-                with Image.open(cache_file) as cached_img:
-                    image = cached_img.convert("RGB")
-                cache_hit = True
-            except Exception:
-                image = None
-
-        if image is None:
-            page = doc[page_number - 1]
-            rect = page.rect
-            zoom = dpi / 72.0
-            longest = max(rect.width, rect.height) * zoom
-            if longest > max_dimension and longest > 0:
-                zoom = max_dimension / max(rect.width, rect.height)
-
-            pixmap = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
-            image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
-
-            # Store ONLY the unwatermarked base raster in cache (ADR-002).
-            if cache_file:
-                tmp_cache = f"{cache_file}.{os.getpid()}.tmp"
+                with open(tmp_cache, "wb") as fh:
+                    image.save(fh, format="PNG", optimize=False)
                 try:
-                    with open(tmp_cache, "wb") as fh:
-                        image.save(fh, format="PNG", optimize=False)
-                    try:
-                        os.chmod(tmp_cache, 0o600)
-                    except OSError:
-                        pass
-                    os.replace(tmp_cache, cache_file)
+                    os.chmod(tmp_cache, 0o600)
                 except OSError:
-                    try:
-                        if os.path.exists(tmp_cache):
-                            os.unlink(tmp_cache)
-                    except OSError:
-                        pass
+                    pass
+                os.replace(tmp_cache, cache_file)
+            except OSError:
+                try:
+                    if os.path.exists(tmp_cache):
+                        os.unlink(tmp_cache)
+                except OSError:
+                    pass
 
-        mark = watermark_text(identity, page_number, total)
-        short_ref = sanitize_unicode_field(identity.get("ref") or identity.get("label"), 36)
-        if with_watermark:
-            image = apply_watermark(image, mark, page_number, total, short_ref=short_ref)
+    mark = watermark_text(identity, page_number, total)
+    short_ref = sanitize_unicode_field(identity.get("ref") or identity.get("label"), 36)
+    if with_watermark:
+        image = apply_watermark(image, mark, page_number, total, short_ref=short_ref)
 
-        buffer = io.BytesIO()
-        image.save(buffer, format="PNG", optimize=False)
-        png_bytes = buffer.getvalue()
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG", optimize=False)
+    png_bytes = buffer.getvalue()
 
-        return {
-            "ok": True,
-            "png": base64.b64encode(png_bytes).decode("ascii"),
-            "width": image.width,
-            "height": image.height,
-            "pageCount": total,
-            "bytes": len(png_bytes),
-            "sha256": hashlib.sha256(png_bytes).hexdigest(),
-            "watermark": mark if with_watermark else None,
-            "renderMs": int((time.perf_counter() - started) * 1000),
-            "cacheHit": cache_hit,
-        }
-    finally:
-        doc.close()
+    return {
+        "ok": True,
+        "engine": adapter.engine_id,
+        "png": base64.b64encode(png_bytes).decode("ascii"),
+        "width": image.width,
+        "height": image.height,
+        "pageCount": total,
+        "bytes": len(png_bytes),
+        "sha256": hashlib.sha256(png_bytes).hexdigest(),
+        "watermark": mark if with_watermark else None,
+        "renderMs": int((time.perf_counter() - started) * 1000),
+        "cacheHit": cache_hit,
+    }
 
 
-def selftest(path: str, page_number: int = 1, dpi: int = 96) -> dict:
+def selftest(path: str, page_number: int = 1, dpi: int = 96, engine_name: str | None = None) -> dict:
     """Prove that two identities (including CJK Unicode) produce materially different pixels."""
     stamp = "2026-11-24T12:00:00Z"
-    a = render(path, page_number, dpi, {"label": "Student A", "ref": "usr_aaa111", "stamp": stamp})
-    b = render(path, page_number, dpi, {"label": "陈伟明 Student B", "ref": "usr_bbb222", "stamp": stamp})
+    a = render(
+        path,
+        page_number,
+        dpi,
+        {"label": "Student A", "ref": "usr_aaa111", "stamp": stamp},
+        engine_name=engine_name,
+    )
+    b = render(
+        path,
+        page_number,
+        dpi,
+        {"label": "陈伟明 Student B", "ref": "usr_bbb222", "stamp": stamp},
+        engine_name=engine_name,
+    )
     clean = render(
         path,
         page_number,
         dpi,
         {"label": "Student A", "ref": "usr_aaa111", "stamp": stamp},
         with_watermark=False,
+        engine_name=engine_name,
     )
+    font_source, font_path = resolve_font_info("陈伟明")
 
     return {
         "ok": True,
+        "engine": a["engine"],
+        "fontSource": font_source,
+        "fontLoaded": bool(font_path),
         "page": page_number,
         "dpi": dpi,
         "watermarkedOutputsDiffer": a["sha256"] != b["sha256"],
@@ -387,9 +342,10 @@ def main() -> None:
         fail("bad_request", "Request body is not valid JSON.")
 
     command = request.get("command")
+    engine_name = str(request.get("engine")).strip() if request.get("engine") else None
     try:
         if command == "probe":
-            result = probe(str(request.get("path") or ""))
+            result = probe(str(request.get("path") or ""), engine_name=engine_name)
         elif command == "render":
             result = render(
                 str(request.get("path") or ""),
@@ -400,20 +356,26 @@ def main() -> None:
                 bool(request.get("watermark", True)),
                 str(request.get("cacheDir")) if request.get("cacheDir") else None,
                 str(request.get("contentHash")) if request.get("contentHash") else None,
+                engine_name=engine_name,
             )
         elif command == "selftest":
             result = selftest(
                 str(request.get("path") or ""),
                 int(request.get("page") or 1),
                 int(request.get("dpi") or 96),
+                engine_name=engine_name,
             )
         else:
             fail("bad_command", f"Unknown command: {command!r}")
             return
+    except PdfEngineError as error:
+        fail(error.code, error.message)
+        return
     except SystemExit:
         raise
     except (ValueError, TypeError) as error:
         fail("bad_request", str(error))
+        return
 
     sys.stdout.write(json.dumps(result))
     sys.stdout.flush()

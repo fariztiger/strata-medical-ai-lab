@@ -133,9 +133,12 @@ export const LOGIN_ACCOUNT_WINDOW_SECONDS = Number(process.env.CV_LOGIN_ACCOUNT_
 export const PAGE_TOKEN_TTL_SECONDS = Number(process.env.CV_PAGE_TOKEN_TTL || 45);
 export const AUDIO_TOKEN_TTL_SECONDS = Number(process.env.CV_AUDIO_TOKEN_TTL || 60);
 
-/** Render geometry. */
+/** Render geometry and modular PDF engine selection (Mission 004 Phase A). */
 export const RENDER_DPI = Number(process.env.CV_RENDER_DPI || 144);
 export const MAX_RASTER_DIMENSION = 2600;
+export const PDF_ENGINE = String(process.env.CV_PDF_ENGINE || "pypdfium2")
+  .trim()
+  .toLowerCase();
 
 /** Upload guard rails. */
 export const MAX_UPLOAD_BYTES = 40 * 1024 * 1024;
