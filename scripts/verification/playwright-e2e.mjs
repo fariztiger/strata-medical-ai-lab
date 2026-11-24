@@ -410,7 +410,8 @@ try {
   await mobStuPage.waitForSelector("[data-open-doc]");
   await assertNoHorizontalOverflow(mobStuPage, "mobile-student-library");
   await mobStuPage.click("[data-open-doc]");
-  await waitForRenderedPageImage(mobStuPage, 1);
+  // Student A navigated to Page 2 in Desktop Step 2, so reading progress resumes on Page 2!
+  await waitForRenderedPageImage(mobStuPage, 2);
   await assertNoHorizontalOverflow(mobStuPage, "mobile-student-reader");
 
   await mobStuPage.click("#btn-toggle-chapters");
