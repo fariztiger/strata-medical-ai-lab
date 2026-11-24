@@ -2,6 +2,13 @@
 
 All notable changes to `strata-medical-ai-lab` are documented in this file.
 
+## [0.2.0] — 2026-11-24 (Mission 004: Technology Sustainability, Real Chromium E2E & Production Architecture)
+
+### Changed & Added
+- **Phase A (PDF Engine Sustainability):** Replaced `PyMuPDF` (`AGPL-3.0`) with a modular `PdfRasterAdapter` (`packages/watermark-engine/adapters/`, `apps/contentvault-api/src/services/pdf-engine.js`) defaulting to `pypdfium2==5.15.2` (`12.6%` faster cold renders, `23.7%` lower peak RSS) + standalone SHA-256-verified *WenQuanYi Micro Hei* (`Apache-2.0` elected), documented transitive binary licenses and redistribution obligations (`docs/licensing/PDF_ENGINE_LICENSES_AND_OBLIGATIONS.md`), and added `tests/phase-a-pdf-engine.test.js`.
+- **Phase B (Real Chromium Verification):** Configured `.github/workflows/phase-b-browser-ci.yml` and expanded `scripts/verification/playwright-e2e.mjs` to execute genuine headless Chromium tests at `1440×900` (Desktop) and `390×844` (Mobile) across all 4 synthetic personas + Reviewer, fixing a `390px` CSS Grid `minmax(0, 1fr)` mobile overflow and capturing genuine Chromium screenshots in `reports/browser-screenshots/`.
+- **Phase C (Production Architecture):** Published `docs/architecture/POSTGRES_MIGRATION_AND_RLS_DESIGN.md`, implemented `db/migrations/001_postgres_schema_and_rls.sql` + `PostgresPersistenceAdapter` (verified live on `postgres:16-alpine`), replaced in-memory rate limits with shared bounded `rate_limit_buckets` (`maxBuckets=10000`), mitigated unauthenticated account-lockout DoS via composite `(IP, Account)` pair throttling, enforced production secret Shannon entropy + `CV_SIGNING_SECRET_FILE` `0600` permissions + `CV_SIGNING_SECRET_PREVIOUS` rotation, added the bilingual `#view-reviewer` portal, and published `reports/PRODUCTION_READINESS_004.md` (`40/40` Node tests passing).
+
 ## [0.1.2] — 2026-11-24 (Mission 003-A: Security Hardening & Production Isolation)
 
 ### Security (`SEC-001` .. `SEC-005`)

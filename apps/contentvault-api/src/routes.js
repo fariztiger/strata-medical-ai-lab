@@ -1597,6 +1597,7 @@ async function handleEngineSelftest(req, res) {
 
   return sendJson(res, 200, {
     ok: true,
+    engine: report.engine || "pypdfium2",
     documentId: doc.id,
     page: testPage,
     watermarkIdentityBound: report.watermarkedOutputsDiffer,

@@ -231,7 +231,7 @@ try {
   await adminPage.waitForSelector("#admin-panel-audit:not(.hidden)");
   await adminPage.click("#btn-run-selftest");
   await adminPage.waitForFunction(() =>
-    document.getElementById("selftest-output")?.textContent?.includes('"watermarkedOutputsDiffer": true'),
+    document.getElementById("selftest-output")?.textContent?.includes('"watermarkIdentityBound": true'),
   );
   await adminPage.click('[data-admin-tab="overview"]');
   report.checks.persona1AdminDesktop = true;
@@ -449,6 +449,7 @@ try {
   fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
   console.log("BROWSER_VERIFICATION_PASSED:", JSON.stringify(report, null, 2));
 } catch (err) {
+  console.error(`::error::Playwright E2E failure: ${String(err.message || err).replace(/\r?\n/g, " | ")}`);
   report.error = { message: err.message, stack: err.stack };
   fs.writeFileSync(
     path.join(SCREENSHOT_DIR, "browser-verification-report.json"),
