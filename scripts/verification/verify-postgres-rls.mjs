@@ -38,8 +38,13 @@ const pool = new Pool({ connectionString: dbUrl });
 try {
   const ddl = fs.readFileSync(MIGRATION_PATH, "utf8");
   await pool.query(ddl);
+  await pool.query("DO $$ BEGIN EXECUTE format('GRANT cv_app_user TO %I', current_user); END $$;");
 
-  const adapter = new PostgresPersistenceAdapter(pool);
+  const adapter = new PostgresPersistenceAdapter(pool, {
+    appRole: "cv_app_user",
+    enforceRoleSeparation: false,
+  });
+  await adapter.init();
 
   // Clean tables as migration owner (`strata_owner`) before testing `cv_app_user` RLS
   await pool.query(
