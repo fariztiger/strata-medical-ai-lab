@@ -223,32 +223,49 @@ export function normalizeIp(raw) {
     if (net.isIPv4(v4)) return v4;
   }
   if (trimmed === "::1") return "127.0.0.1";
-  return net.isIP(trimmed) ? trimmed : "";
-}
-
-function ipv4ToInt(ip) {
-  return ip
-    .split(".")
-    .reduce((acc, oct) => ((acc << 8) + Number.parseInt(oct, 10)) >>> 0, 0);
+  return net.isIP(trimmed) ? trimmed.toLowerCase() : "";
 }
 
 function matchesTrustedSpec(ip, spec) {
   const cleanIp = normalizeIp(ip);
   if (!cleanIp) return false;
-  if (spec === "loopback") {
+  const trimmedSpec = String(spec || "").trim().toLowerCase();
+  if (!trimmedSpec) return false;
+
+  if (trimmedSpec === "loopback") {
     return cleanIp === "127.0.0.1";
   }
-  if (spec.includes("/")) {
-    const [base, prefixRaw] = spec.split("/");
-    const cleanBase = normalizeIp(base);
+
+  if (trimmedSpec.includes("/")) {
+    const [baseRaw, prefixRaw] = trimmedSpec.split("/");
     const prefix = Number.parseInt(prefixRaw, 10);
-    if (net.isIPv4(cleanIp) && net.isIPv4(cleanBase) && prefix >= 0 && prefix <= 32) {
-      const mask = prefix === 0 ? 0 : (~0 << (32 - prefix)) >>> 0;
-      return (ipv4ToInt(cleanIp) & mask) === (ipv4ToInt(cleanBase) & mask);
+    if (!Number.isInteger(prefix)) return false;
+
+    // Special-case IPv6 loopback `/128` since `normalizeIp('::1')` maps to `'127.0.0.1'`
+    if (baseRaw === "::1" && prefix === 128) {
+      return cleanIp === "127.0.0.1";
     }
-    return false;
+
+    const cleanBase = normalizeIp(baseRaw);
+    const ipFamily = net.isIP(cleanIp);
+    const baseFamily = net.isIP(cleanBase);
+    if (!ipFamily || ipFamily !== baseFamily) return false;
+
+    const maxPrefix = ipFamily === 4 ? 32 : 128;
+    if (prefix < 0 || prefix > maxPrefix) return false;
+    if (prefix === 0) return true;
+
+    try {
+      const blockList = new net.BlockList();
+      const typeLabel = ipFamily === 4 ? "ipv4" : "ipv6";
+      blockList.addSubnet(cleanBase, prefix, typeLabel);
+      return blockList.check(cleanIp, typeLabel);
+    } catch {
+      return false;
+    }
   }
-  return cleanIp === normalizeIp(spec);
+
+  return cleanIp === normalizeIp(trimmedSpec);
 }
 
 export function isTrustedProxyIp(ip) {

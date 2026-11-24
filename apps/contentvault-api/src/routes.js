@@ -86,7 +86,8 @@ import {
   LOGIN_IP_LIMIT_PER_MINUTE,
   LOGIN_PAIR_FAIL_LIMIT,
   LOGIN_ACCOUNT_FAIL_LIMIT,
-  LOGIN_GLOBAL_CPU_CEILING,
+  LOGIN_GLOBAL_FAIL_BUDGET,
+  LOGIN_CLEAN_IP_VERIFY_CEILING,
   LOGIN_ACCOUNT_WINDOW_SECONDS,
   MAX_UPLOAD_BYTES,
   MAX_PDF_PAGES,
@@ -462,18 +463,34 @@ async function handleLogin(req, res) {
   }
 
   const normalizedEmail = body.email.trim().toLowerCase().slice(0, 180);
+  const windowSec = Number(
+    process.env.CV_LOGIN_ACCOUNT_WINDOW_SECONDS || LOGIN_ACCOUNT_WINDOW_SECONDS,
+  );
+  const pairFailLimit = Number(
+    process.env.CV_LOGIN_PAIR_FAIL_LIMIT || LOGIN_PAIR_FAIL_LIMIT,
+  );
+  const acctFailLimit = Number(
+    process.env.CV_LOGIN_ACCOUNT_FAIL_LIMIT || LOGIN_ACCOUNT_FAIL_LIMIT,
+  );
+  const globalFailBudget = Number(
+    process.env.CV_LOGIN_GLOBAL_FAIL_BUDGET ||
+      process.env.CV_LOGIN_GLOBAL_CPU_CEILING ||
+      LOGIN_GLOBAL_FAIL_BUDGET,
+  );
+  const cleanIpVerifyCeiling = Number(
+    process.env.CV_LOGIN_CLEAN_IP_VERIFY_CEILING || LOGIN_CLEAN_IP_VERIFY_CEILING,
+  );
+
   const pairKey = `login:pair:${meta.ip}:${normalizedEmail}`;
   const acctKey = `login:acct:${normalizedEmail}`;
-  const cpuKey = `login:acct-cpu:${normalizedEmail}`;
+  const failBudgetKey = `login:acct-fail:${normalizedEmail}`;
+  const cleanVerifyKey = `login:acct-clean:${normalizedEmail}`;
 
-  // 1. Per-(IP, Account) pair throttle blocks single-source brute force without
-  //    locking out the legitimate account owner signing in from a clean network.
-  const pairStatus = await rateLimitAsync(
-    pairKey,
-    LOGIN_PAIR_FAIL_LIMIT,
-    LOGIN_ACCOUNT_WINDOW_SECONDS,
-    { increment: false, protectLockout: true },
-  );
+  // 1. Per-(IP, Account) pair lockout (`AUD-D2`: `protectLockout: true` prevents spray eviction).
+  const pairStatus = await rateLimitAsync(pairKey, pairFailLimit, windowSec, {
+    increment: false,
+    protectLockout: true,
+  });
   if (!pairStatus.allowed) {
     await auditAsync({
       event: "auth.login",
@@ -482,7 +499,7 @@ async function handleLogin(req, res) {
       userAgent: meta.userAgent,
       detail: { reason: "ip_account_pair_throttled", email: normalizedEmail },
     });
-    res.setHeader("Retry-After", String(pairStatus.retryAfter || LOGIN_ACCOUNT_WINDOW_SECONDS));
+    res.setHeader("Retry-After", String(pairStatus.retryAfter || windowSec));
     return sendError(
       res,
       429,
@@ -492,39 +509,26 @@ async function handleLogin(req, res) {
     );
   }
 
-  // 2. Hard global scrypt CPU ceiling per account (upgraded further in Checkpoint 005-C).
-  const cpuStatus = await rateLimitAsync(
-    cpuKey,
-    LOGIN_GLOBAL_CPU_CEILING,
-    LOGIN_ACCOUNT_WINDOW_SECONDS,
-    { increment: true },
-  );
-  if (!cpuStatus.allowed) {
-    await auditAsync({
-      event: "auth.login",
-      outcome: "deny",
-      ip: meta.ip,
-      userAgent: meta.userAgent,
-      detail: { reason: "account_cpu_ceiling", email: normalizedEmail },
-    });
-    res.setHeader("Retry-After", String(cpuStatus.retryAfter || LOGIN_ACCOUNT_WINDOW_SECONDS));
-    return sendError(
-      res,
-      429,
-      "rate_limited",
-      "Account sign-in capacity temporarily saturated; please retry shortly.",
-      { retryAfter: cpuStatus.retryAfter },
-    );
-  }
-
-  // 3. Distributed account velocity check:
-  const acctStatus = await rateLimitAsync(
-    acctKey,
-    LOGIN_ACCOUNT_FAIL_LIMIT,
-    LOGIN_ACCOUNT_WINDOW_SECONDS,
+  // 2. Account-wide failed-attempt velocity & global failure budget checks (`AUD-D1` fix):
+  //    - Repeat-offender IPs (`pairStatus.count > 0`) are blocked BEFORE `scrypt` as soon
+  //      as the account enters distributed-attack state (`!acctStatus.allowed` or `!failBudget.allowed`).
+  //    - Clean IPs (`pairStatus.count === 0`) are NOT locked out by third-party failed attempts!
+  //      Instead, clean-IP attempts use a separate bounded verification budget (`cleanVerifyKey`)
+  //      plus the process-wide `verifyPasswordAsync` scrypt concurrency semaphore (`503 auth_busy`).
+  const acctStatus = await rateLimitAsync(acctKey, acctFailLimit, windowSec, {
+    increment: false,
+    protectLockout: true,
+  });
+  const failBudgetStatus = await rateLimitAsync(
+    failBudgetKey,
+    globalFailBudget,
+    windowSec,
     { increment: false, protectLockout: true },
   );
-  if (!acctStatus.allowed && pairStatus.count > 0) {
+
+  if (pairStatus.count > 0 && (!acctStatus.allowed || !failBudgetStatus.allowed)) {
+    const retrySec =
+      acctStatus.retryAfter || failBudgetStatus.retryAfter || windowSec;
     await auditAsync({
       event: "auth.login",
       outcome: "deny",
@@ -532,20 +536,58 @@ async function handleLogin(req, res) {
       userAgent: meta.userAgent,
       detail: { reason: "account_throttled", email: normalizedEmail },
     });
-    res.setHeader("Retry-After", String(acctStatus.retryAfter || LOGIN_ACCOUNT_WINDOW_SECONDS));
+    res.setHeader("Retry-After", String(retrySec));
     return sendError(
       res,
       429,
       "rate_limited",
       "Account temporarily throttled due to repeated failed sign-in attempts.",
-      { retryAfter: acctStatus.retryAfter },
+      { retryAfter: retrySec },
     );
+  }
+
+  if (pairStatus.count === 0) {
+    const cleanBudget = await rateLimitAsync(
+      cleanVerifyKey,
+      cleanIpVerifyCeiling,
+      windowSec,
+      { increment: true },
+    );
+    if (!cleanBudget.allowed) {
+      await auditAsync({
+        event: "auth.login",
+        outcome: "deny",
+        ip: meta.ip,
+        userAgent: meta.userAgent,
+        detail: { reason: "clean_ip_verify_ceiling", email: normalizedEmail },
+      });
+      res.setHeader("Retry-After", String(cleanBudget.retryAfter || windowSec));
+      return sendError(
+        res,
+        429,
+        "rate_limited",
+        "Account sign-in verification capacity temporarily saturated; please retry shortly.",
+        { retryAfter: cleanBudget.retryAfter },
+      );
+    }
   }
 
   let session;
   try {
     session = await loginAsync({ email: body.email, password: body.password, ...meta });
   } catch (error) {
+    if (error?.code === "auth_busy" || error?.statusCode === 503) {
+      const retrySec = Number(error.retryAfter || 2);
+      await auditAsync({
+        event: "auth.login",
+        outcome: "deny",
+        ip: meta.ip,
+        userAgent: meta.userAgent,
+        detail: { reason: "scrypt_backpressure", email: normalizedEmail },
+      });
+      res.setHeader("Retry-After", String(retrySec));
+      return sendError(res, 503, "auth_busy", error.message, { retryAfter: retrySec });
+    }
     await auditAsync({
       event: "auth.login",
       outcome: "error",
@@ -557,17 +599,32 @@ async function handleLogin(req, res) {
   }
 
   if (!session) {
-    await rateLimitAsync(pairKey, LOGIN_PAIR_FAIL_LIMIT, LOGIN_ACCOUNT_WINDOW_SECONDS, {
+    await rateLimitAsync(pairKey, pairFailLimit, windowSec, {
       increment: true,
       protectLockout: true,
     });
-    const updatedAcct = await rateLimitAsync(
-      acctKey,
-      LOGIN_ACCOUNT_FAIL_LIMIT,
-      LOGIN_ACCOUNT_WINDOW_SECONDS,
+    const updatedAcct = await rateLimitAsync(acctKey, acctFailLimit, windowSec, {
+      increment: true,
+      protectLockout: true,
+    });
+    const updatedFailBudget = await rateLimitAsync(
+      failBudgetKey,
+      globalFailBudget,
+      windowSec,
       { increment: true, protectLockout: true },
     );
-    if (!acctStatus.allowed || (!updatedAcct.allowed && updatedAcct.count > LOGIN_ACCOUNT_FAIL_LIMIT)) {
+
+    if (
+      !acctStatus.allowed ||
+      !failBudgetStatus.allowed ||
+      (!updatedAcct.allowed && updatedAcct.count > acctFailLimit) ||
+      (!updatedFailBudget.allowed && updatedFailBudget.count > globalFailBudget)
+    ) {
+      const retrySec =
+        updatedAcct.retryAfter ||
+        acctStatus.retryAfter ||
+        updatedFailBudget.retryAfter ||
+        windowSec;
       await auditAsync({
         event: "auth.login",
         outcome: "deny",
@@ -575,16 +632,13 @@ async function handleLogin(req, res) {
         userAgent: meta.userAgent,
         detail: { reason: "account_throttled", email: normalizedEmail },
       });
-      res.setHeader(
-        "Retry-After",
-        String(updatedAcct.retryAfter || acctStatus.retryAfter || LOGIN_ACCOUNT_WINDOW_SECONDS),
-      );
+      res.setHeader("Retry-After", String(retrySec));
       return sendError(
         res,
         429,
         "rate_limited",
         "Account temporarily throttled due to repeated failed sign-in attempts.",
-        { retryAfter: updatedAcct.retryAfter || LOGIN_ACCOUNT_WINDOW_SECONDS },
+        { retryAfter: retrySec },
       );
     }
     return sendError(res, 401, "invalid_credentials", "Email or password is incorrect.");

@@ -12,6 +12,8 @@ import {
   newId,
   randomToken,
   verifyPassword,
+  verifyPasswordAsync,
+  ScryptOverloadError,
   TokenError,
   signToken,
   verifyToken,
@@ -233,7 +235,7 @@ export async function loginAsync({ email, password, ip, userAgent }) {
   const authRow = await adapter.lookupAuthUserForLogin(email);
   const stored = authRow?.password_hash ?? DUMMY_PASSWORD_HASH;
 
-  const ok = verifyPassword(String(password ?? ""), stored) && Boolean(authRow);
+  const ok = (await verifyPasswordAsync(String(password ?? ""), stored)) && Boolean(authRow);
 
   if (!authRow || !ok || authRow.disabled_at) {
     await auditAsync({
@@ -519,4 +521,4 @@ export function verifyAudioToken(token) {
   return verifyToken(token, "audio");
 }
 
-export { TokenError };
+export { TokenError, ScryptOverloadError };

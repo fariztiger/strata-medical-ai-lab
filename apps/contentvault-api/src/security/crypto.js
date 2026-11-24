@@ -10,6 +10,63 @@ import { resolveSigningSecret, resolveVerificationSecrets } from "../config.js";
 
 const SCRYPT_PARAMS = { N: 16384, r: 8, p: 1, keylen: 64 };
 
+export class ScryptOverloadError extends Error {
+  constructor(message = "Authentication verification workers temporarily saturated; please retry shortly.") {
+    super(message);
+    this.name = "ScryptOverloadError";
+    this.code = "auth_busy";
+    this.statusCode = 503;
+    this.retryAfter = 2;
+  }
+}
+
+let scryptActive = 0;
+let scryptTotalCompleted = 0;
+let scryptTotalRejected = 0;
+const scryptWaitQueue = [];
+
+function maxScryptConcurrency() {
+  return Math.max(1, Number(process.env.CV_LOGIN_MAX_CONCURRENT_SCRYPT || 8));
+}
+
+function maxScryptQueue() {
+  return Math.max(0, Number(process.env.CV_LOGIN_MAX_SCRYPT_QUEUE ?? 32));
+}
+
+function releaseScryptSlot() {
+  scryptActive = Math.max(0, scryptActive - 1);
+  while (scryptActive < maxScryptConcurrency() && scryptWaitQueue.length > 0) {
+    const next = scryptWaitQueue.shift();
+    scryptActive += 1;
+    next();
+  }
+}
+
+function acquireScryptSlot() {
+  if (scryptActive < maxScryptConcurrency()) {
+    scryptActive += 1;
+    return Promise.resolve();
+  }
+  if (scryptWaitQueue.length >= maxScryptQueue()) {
+    scryptTotalRejected += 1;
+    return Promise.reject(new ScryptOverloadError());
+  }
+  return new Promise((resolve) => {
+    scryptWaitQueue.push(resolve);
+  });
+}
+
+export function getScryptPoolStats() {
+  return {
+    active: scryptActive,
+    queued: scryptWaitQueue.length,
+    maxConcurrency: maxScryptConcurrency(),
+    maxQueue: maxScryptQueue(),
+    completed: scryptTotalCompleted,
+    rejected: scryptTotalRejected,
+  };
+}
+
 export function hashPassword(password) {
   if (typeof password !== "string" || password.length < 8) {
     throw new Error("Password must be at least 8 characters.");
@@ -46,6 +103,45 @@ export function verifyPassword(password, stored) {
     );
   } catch {
     return false;
+  }
+}
+
+export async function verifyPasswordAsync(password, stored) {
+  if (typeof password !== "string" || typeof stored !== "string") return false;
+  const parts = stored.split("$");
+  if (parts.length !== 6 || parts[0] !== "scrypt") return false;
+  const [, N, r, p, saltB64, hashB64] = parts;
+  const salt = Buffer.from(saltB64, "base64");
+  const expected = Buffer.from(hashB64, "base64");
+
+  await acquireScryptSlot();
+  try {
+    const derived = await new Promise((resolve, reject) => {
+      crypto.scrypt(
+        password,
+        salt,
+        expected.length,
+        {
+          N: Number(N),
+          r: Number(r),
+          p: Number(p),
+          maxmem: 128 * 1024 * 1024,
+        },
+        (err, key) => {
+          if (err) reject(err);
+          else resolve(key);
+        },
+      );
+    });
+    scryptTotalCompleted += 1;
+    return (
+      derived.length === expected.length &&
+      crypto.timingSafeEqual(derived, expected)
+    );
+  } catch {
+    return false;
+  } finally {
+    releaseScryptSlot();
   }
 }
 
