@@ -1,82 +1,99 @@
 /**
- * Append-only audit logging.
+ * Append-only audit logging across SQLite & PostgreSQL (Mission 005 Phase A/B).
  *
  * Every authorisation decision that matters is recorded: grants, revocations,
- * page renders, denials and admin actions. Denials are as important as
- * successes - they are the evidence that controls actually fire.
+ * page renders, denials and admin actions.
  */
 
-import { getDb, nowIso } from "../db.js";
+import { nowIso } from "../db.js";
 import { newId } from "./crypto.js";
+import {
+  getPersistenceAdapter,
+  getActivePersistenceAdapterSync,
+} from "../persistence/adapter.js";
+
+function normalizeAuditRecord(entry) {
+  return {
+    id: newId("aud"),
+    createdAt: nowIso(),
+    event: String(entry.event),
+    outcome: String(entry.outcome),
+    actorId: entry.actorId ?? null,
+    actorRole: entry.actorRole ?? null,
+    subjectId: entry.subjectId ?? null,
+    documentId: entry.documentId ?? null,
+    page: entry.page ?? null,
+    ip: entry.ip ?? null,
+    userAgent: entry.userAgent ? String(entry.userAgent).slice(0, 300) : null,
+    detail: entry.detail ?? null,
+  };
+}
 
 /**
- * @param {object} entry
- * @param {string} entry.event      e.g. "page.render"
- * @param {"allow"|"deny"|"info"|"error"} entry.outcome
- * @param {string} [entry.actorId]
- * @param {string} [entry.actorRole]
- * @param {string} [entry.subjectId]
- * @param {string} [entry.documentId]
- * @param {number} [entry.page]
- * @param {string} [entry.ip]
- * @param {string} [entry.userAgent]
- * @param {object} [entry.detail]
+ * Asynchronous append-only audit write through the active persistence backend.
  */
-export function audit(entry) {
+export async function auditAsync(entry, actor = null) {
   try {
-    getDb()
-      .prepare(
-        `INSERT INTO audit_log
-          (id, created_at, event, outcome, actor_id, actor_role, subject_id,
-           document_id, page, ip, user_agent, detail)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        newId("aud"),
-        nowIso(),
-        String(entry.event),
-        String(entry.outcome),
-        entry.actorId ?? null,
-        entry.actorRole ?? null,
-        entry.subjectId ?? null,
-        entry.documentId ?? null,
-        entry.page ?? null,
-        entry.ip ?? null,
-        entry.userAgent ? String(entry.userAgent).slice(0, 300) : null,
-        entry.detail ? JSON.stringify(entry.detail).slice(0, 4000) : null,
-      );
+    const adapter = await getPersistenceAdapter();
+    const effectiveActor =
+      actor ||
+      (entry.actorId && entry.actorRole
+        ? { id: entry.actorId, role: entry.actorRole }
+        : { role: "anonymous" });
+    await adapter.appendAuditLog(effectiveActor, normalizeAuditRecord(entry));
   } catch (error) {
-    // Audit failure must be loud but must never take down the request path.
     console.error("[audit] failed to write entry", entry.event, error.message);
   }
 }
 
-export function listAudit({
-  limit = 100,
-  documentId = null,
-  event = null,
-  outcome = null,
-} = {}) {
+/**
+ * Backwards-compatible synchronous/fire-and-forget audit helper.
+ */
+export function audit(entry) {
+  const syncAdapter = getActivePersistenceAdapterSync();
+  if (syncAdapter && syncAdapter.kind === "sqlite") {
+    try {
+      syncAdapter.appendAuditLog(null, normalizeAuditRecord(entry));
+    } catch (error) {
+      console.error("[audit] failed to write sqlite entry", entry.event, error.message);
+    }
+    return;
+  }
+  void auditAsync(entry);
+}
+
+export async function listAuditAsync(
+  actor,
+  { limit = 100, documentId = null, event = null, outcome = null } = {},
+) {
+  const adapter = await getPersistenceAdapter();
+  return adapter.listAuditLog(actor, { limit, documentId, event, outcome });
+}
+
+export function listAudit(filters = {}) {
+  const syncAdapter = getActivePersistenceAdapterSync();
+  if (!syncAdapter || syncAdapter.kind !== "sqlite") {
+    throw new Error("listAudit() sync helper is only available on SQLite; use listAuditAsync().");
+  }
+  const db = syncAdapter._getDb();
   const clauses = [];
   const params = [];
-  if (documentId) {
+  if (filters.documentId) {
     clauses.push("document_id = ?");
-    params.push(documentId);
+    params.push(filters.documentId);
   }
-  if (event) {
+  if (filters.event) {
     clauses.push("event = ?");
-    params.push(event);
+    params.push(filters.event);
   }
-  if (outcome) {
+  if (filters.outcome) {
     clauses.push("outcome = ?");
-    params.push(outcome);
+    params.push(filters.outcome);
   }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
-  const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 500);
-  const rows = getDb()
-    .prepare(
-      `SELECT * FROM audit_log ${where} ORDER BY created_at DESC, rowid DESC LIMIT ?`,
-    )
+  const safeLimit = Math.min(Math.max(Number(filters.limit) || 100, 1), 500);
+  const rows = db
+    .prepare(`SELECT * FROM audit_log ${where} ORDER BY created_at DESC, rowid DESC LIMIT ?`)
     .all(...params, safeLimit);
   return rows.map((row) => ({
     ...row,
@@ -91,5 +108,3 @@ function safeJson(text) {
     return text;
   }
 }
-
-

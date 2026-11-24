@@ -11,7 +11,10 @@ import {
   RATE_LIMIT_MAX_BUCKETS,
 } from "../config.js";
 import { getDb } from "../db.js";
-import { sharedSqliteRateLimit } from "../persistence/adapter.js";
+import {
+  sharedSqliteRateLimit,
+  getPersistenceAdapter,
+} from "../persistence/adapter.js";
 
 export const MAX_JSON_BYTES = 1024 * 256;
 
@@ -310,6 +313,16 @@ export function rateLimit(key, limit, windowSeconds, options = {}) {
   return sharedSqliteRateLimit(getDb(), key, limit, windowSeconds, {
     increment: options.increment !== false,
     maxBuckets,
+    protectLockout: Boolean(options.protectLockout),
+  });
+}
+
+export async function rateLimitAsync(key, limit, windowSeconds, options = {}) {
+  const adapter = await getPersistenceAdapter();
+  return adapter.rateLimit(key, limit, windowSeconds, {
+    increment: options.increment !== false,
+    maxBuckets: Number(options.maxBuckets || RATE_LIMIT_MAX_BUCKETS),
+    protectLockout: Boolean(options.protectLockout),
   });
 }
 
@@ -317,6 +330,11 @@ export function clearRateLimit(key) {
   getDb()
     .prepare("DELETE FROM rate_limit_buckets WHERE bucket_key = ?")
     .run(String(key || "").slice(0, 256));
+}
+
+export async function clearRateLimitAsync(key) {
+  const adapter = await getPersistenceAdapter();
+  await adapter.clearRateLimit(key);
 }
 
 /** CSRF-style protection: mutating requests must match Host (honoring X-Forwarded-Host ONLY from trusted proxies). */

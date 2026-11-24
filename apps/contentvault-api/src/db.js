@@ -9,6 +9,7 @@
  * docs/decisions/ADR-001-zero-dependency-runtime.md & reports/SECURITY_REMEDIATION_003.md).
  */
 
+import fs from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { DB_PATH, ensureDirs } from "./config.js";
 
@@ -127,12 +128,13 @@ CREATE TABLE IF NOT EXISTS rate_limits (
   count        INTEGER NOT NULL
 );
 
--- Shared & bounded fixed-window rate-limit buckets (Mission 004 Phase C).
+-- Shared & bounded fixed-window rate-limit buckets (Mission 004 Phase C / Mission 005 Phase C).
 CREATE TABLE IF NOT EXISTS rate_limit_buckets (
   bucket_key      TEXT PRIMARY KEY,
   window_start_ms INTEGER NOT NULL,
   expires_at_ms   INTEGER NOT NULL,
-  count           INTEGER NOT NULL
+  count           INTEGER NOT NULL,
+  is_locked       INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_rate_limit_buckets_exp ON rate_limit_buckets(expires_at_ms);
 
@@ -210,6 +212,27 @@ function migrateExistingSchema(database) {
   if (enqTable?.sql && !enqTable.sql.includes("actor_id")) {
     database.exec("ALTER TABLE portfolio_enquiries ADD COLUMN actor_id TEXT REFERENCES users(id);");
   }
+
+  const rlTable = database
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'rate_limit_buckets'")
+    .get();
+  if (rlTable?.sql && !rlTable.sql.includes("is_locked")) {
+    database.exec("ALTER TABLE rate_limit_buckets ADD COLUMN is_locked INTEGER NOT NULL DEFAULT 0;");
+  }
+}
+
+function hardenSqliteFilePermissions() {
+  if (process.platform === "win32") return;
+  for (const suffix of ["", "-wal", "-shm"]) {
+    const target = `${DB_PATH}${suffix}`;
+    if (fs.existsSync(target)) {
+      try {
+        fs.chmodSync(target, 0o600);
+      } catch {
+        /* ignore non-owned special files */
+      }
+    }
+  }
 }
 
 export function getDb() {
@@ -218,6 +241,7 @@ export function getDb() {
   db = new DatabaseSync(DB_PATH);
   db.exec(SCHEMA);
   migrateExistingSchema(db);
+  hardenSqliteFilePermissions();
   return db;
 }
 

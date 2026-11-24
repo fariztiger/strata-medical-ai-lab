@@ -1,10 +1,9 @@
 /**
- * Authentication and server-side authorisation.
+ * Authentication and server-side authorisation across PostgreSQL & SQLite (Mission 005).
  *
  * Design rule (AGENTS.md s.13): NEVER trust client-submitted identity.
- * The only identity source is the session cookie, looked up in the database on
- * every request. No user id, email or role is ever read from a request body,
- * query string or custom header for authorisation purposes.
+ * The only identity source is the session cookie, looked up in the active
+ * persistence backend on every request.
  */
 
 import { getDb, nowIso } from "../db.js";
@@ -23,7 +22,11 @@ import {
   PAGE_TOKEN_TTL_SECONDS,
   AUDIO_TOKEN_TTL_SECONDS,
 } from "../config.js";
-import { audit } from "./audit.js";
+import { audit, auditAsync } from "./audit.js";
+import {
+  getPersistenceAdapter,
+  getActivePersistenceAdapterSync,
+} from "../persistence/adapter.js";
 
 export const SESSION_COOKIE = "cv_session";
 export const VALID_ROLES = ["admin", "reviewer", "student"];
@@ -36,9 +39,37 @@ function absoluteMaxMs() {
   return SESSION_MAX_HOURS * 60 * 60 * 1000;
 }
 
+function validateUserParams({ email, role }) {
+  if (!VALID_ROLES.includes(role)) {
+    throw new Error(`Invalid role: ${role}`);
+  }
+  const normalizedEmail = String(email).trim().toLowerCase();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(normalizedEmail)) {
+    throw new Error("Invalid email address.");
+  }
+  return normalizedEmail;
+}
+
 /* ------------------------------------------------------------------ */
-/* Users                                                               */
+/* Users (Async primary + Sync SQLite compatibility for legacy tests)  */
 /* ------------------------------------------------------------------ */
+
+export async function createUserAsync(
+  actor,
+  { email, password, displayName, role, locale = "en", isDemo = false },
+) {
+  const normalizedEmail = validateUserParams({ email, role });
+  const adapter = await getPersistenceAdapter();
+  return adapter.createUser(actor || { role: "admin" }, {
+    id: newId("usr"),
+    email: normalizedEmail,
+    displayName: String(displayName).trim(),
+    role,
+    passwordHash: hashPassword(password),
+    locale,
+    isDemo,
+  });
+}
 
 export function createUser({
   email,
@@ -48,13 +79,7 @@ export function createUser({
   locale = "en",
   isDemo = false,
 }) {
-  if (!VALID_ROLES.includes(role)) {
-    throw new Error(`Invalid role: ${role}`);
-  }
-  const normalizedEmail = String(email).trim().toLowerCase();
-  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(normalizedEmail)) {
-    throw new Error("Invalid email address.");
-  }
+  const normalizedEmail = validateUserParams({ email, role });
   const id = newId("usr");
   getDb()
     .prepare(
@@ -74,15 +99,28 @@ export function createUser({
   return findUserById(id);
 }
 
+export async function findUserByIdAsync(actor, id) {
+  if (!id) return null;
+  const adapter = await getPersistenceAdapter();
+  return adapter.findUserById(actor || { role: "admin" }, id);
+}
+
 export function findUserById(id) {
   if (!id) return null;
-  const row = getDb()
-    .prepare(
-      `SELECT id, email, display_name, role, locale, is_demo, created_at, disabled_at
-       FROM users WHERE id = ?`,
-    )
-    .get(id);
-  return row ?? null;
+  return (
+    getDb()
+      .prepare(
+        `SELECT id, email, display_name, role, locale, is_demo, created_at, disabled_at
+         FROM users WHERE id = ?`,
+      )
+      .get(id) ?? null
+  );
+}
+
+export async function findUserByEmailAsync(actor, email) {
+  if (!email) return null;
+  const adapter = await getPersistenceAdapter();
+  return adapter.findUserByEmail(actor || { role: "admin" }, email);
 }
 
 export function findUserByEmail(email) {
@@ -97,6 +135,11 @@ export function findUserByEmail(email) {
   );
 }
 
+export async function listUsersAsync(actor) {
+  const adapter = await getPersistenceAdapter();
+  return adapter.listUsers(actor || { role: "admin" });
+}
+
 export function listUsers() {
   return getDb()
     .prepare(
@@ -109,6 +152,41 @@ export function listUsers() {
 /* ------------------------------------------------------------------ */
 /* Sessions                                                            */
 /* ------------------------------------------------------------------ */
+
+export async function createSessionForUserAsync(
+  user,
+  { ip, userAgent, eventDetail = null } = {},
+) {
+  const adapter = await getPersistenceAdapter();
+  const sessionId = randomToken(32);
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + idleMs()).toISOString();
+
+  await adapter.createSession({
+    id: sessionId,
+    userId: user.id,
+    createdAt: now.toISOString(),
+    lastSeenAt: now.toISOString(),
+    expiresAt,
+    userAgent: userAgent ? String(userAgent).slice(0, 300) : null,
+    ip: ip ?? null,
+  });
+
+  await auditAsync(
+    {
+      event: "auth.login",
+      outcome: "allow",
+      actorId: user.id,
+      actorRole: user.role,
+      ip,
+      userAgent,
+      detail: eventDetail,
+    },
+    user,
+  );
+
+  return { sessionId, user };
+}
 
 export function createSessionForUser(user, { ip, userAgent, eventDetail = null } = {}) {
   const sessionId = randomToken(32);
@@ -142,22 +220,48 @@ export function createSessionForUser(user, { ip, userAgent, eventDetail = null }
   return { sessionId, user };
 }
 
+// Pre-computed dummy scrypt hash so unknown-user login takes constant scrypt work
+// without wasting 2x scrypt (hash + verify) on every miss.
+const DUMMY_PASSWORD_HASH = hashPassword("strata-constant-time-dummy-secret#2026");
+
 /**
- * Verify credentials and open a session.
- * Returns { sessionId, user } on success, null on failure.
+ * Asynchronous credential verification & session creation against active backend
+ * (PostgreSQL `cv_lookup_auth_user` in isolated `auth_bootstrap` tx, or SQLite).
  */
+export async function loginAsync({ email, password, ip, userAgent }) {
+  const adapter = await getPersistenceAdapter();
+  const authRow = await adapter.lookupAuthUserForLogin(email);
+  const stored = authRow?.password_hash ?? DUMMY_PASSWORD_HASH;
+
+  const ok = verifyPassword(String(password ?? ""), stored) && Boolean(authRow);
+
+  if (!authRow || !ok || authRow.disabled_at) {
+    await auditAsync({
+      event: "auth.login",
+      outcome: "deny",
+      actorId: authRow?.id ?? null,
+      actorRole: authRow?.role ?? null,
+      ip,
+      userAgent,
+      detail: {
+        reason: authRow ? (authRow.disabled_at ? "disabled" : "bad_password") : "unknown_user",
+      },
+    });
+    return null;
+  }
+
+  const { password_hash: _ph, ...safeUser } = authRow;
+  return createSessionForUserAsync(safeUser, { ip, userAgent });
+}
+
 export function login({ email, password, ip, userAgent }) {
   const user = findUserByEmail(email);
   const stored = user
     ? getDb().prepare("SELECT password_hash FROM users WHERE id = ?").get(user.id)
         ?.password_hash
-    : null;
+    : DUMMY_PASSWORD_HASH;
 
-  // Always run a scrypt verification to keep timing comparable for unknown users.
-  const ok = stored
-    ? verifyPassword(password, stored)
-    : (verifyPassword(String(password ?? ""), hashPassword("dummy-password-value")),
-      false);
+  const ok = verifyPassword(String(password ?? ""), stored) && Boolean(user);
 
   if (!user || !ok || user.disabled_at) {
     audit({
@@ -178,15 +282,48 @@ export function login({ email, password, ip, userAgent }) {
 }
 
 /**
- * Resolve a session id to a live user, or null.
+ * Resolve session cookie asynchronously across PostgreSQL or SQLite.
  * Enforces BOTH rolling idle timeout AND absolute max session lifetime.
  */
+export async function resolveSessionAsync(sessionId) {
+  if (!sessionId || typeof sessionId !== "string") return null;
+  const adapter = await getPersistenceAdapter();
+  const record = await adapter.resolveSessionRecord(sessionId);
+  if (!record || !record.session) return null;
+
+  const { session, user } = record;
+  const now = Date.now();
+  const createdMs = new Date(session.created_at).getTime();
+  const idleExpiresMs = new Date(session.expires_at).getTime();
+
+  if (
+    idleExpiresMs <= now ||
+    (Number.isFinite(createdMs) && now - createdMs >= absoluteMaxMs())
+  ) {
+    await adapter.deleteSession(sessionId);
+    return null;
+  }
+
+  if (!user || user.disabled_at) {
+    await adapter.deleteSession(sessionId);
+    return null;
+  }
+
+  if (now - new Date(session.last_seen_at).getTime() > 60_000) {
+    const absCapMs = Number.isFinite(createdMs) ? createdMs + absoluteMaxMs() : now + idleMs();
+    const nextExpiry = Math.min(now + idleMs(), absCapMs);
+    await adapter.touchSession(sessionId, {
+      lastSeenAt: new Date(now).toISOString(),
+      expiresAt: new Date(nextExpiry).toISOString(),
+    });
+  }
+  return user;
+}
+
 export function resolveSession(sessionId) {
   if (!sessionId || typeof sessionId !== "string") return null;
   const db = getDb();
-  const session = db
-    .prepare("SELECT * FROM sessions WHERE id = ?")
-    .get(sessionId);
+  const session = db.prepare("SELECT * FROM sessions WHERE id = ?").get(sessionId);
   if (!session) return null;
 
   const now = Date.now();
@@ -207,19 +344,31 @@ export function resolveSession(sessionId) {
     return null;
   }
 
-  // Rolling idle expiry (capped by absolute session lifetime), refreshed at most once a minute.
   if (now - new Date(session.last_seen_at).getTime() > 60_000) {
     const absCapMs = Number.isFinite(createdMs) ? createdMs + absoluteMaxMs() : now + idleMs();
     const nextExpiry = Math.min(now + idleMs(), absCapMs);
-    db.prepare(
-      "UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE id = ?",
-    ).run(
+    db.prepare("UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE id = ?").run(
       new Date(now).toISOString(),
       new Date(nextExpiry).toISOString(),
       sessionId,
     );
   }
   return user;
+}
+
+export async function logoutAsync(sessionId, meta = {}) {
+  if (!sessionId) return;
+  const adapter = await getPersistenceAdapter();
+  const userId = await adapter.deleteSession(sessionId);
+  if (userId) {
+    await auditAsync({
+      event: "auth.logout",
+      outcome: "info",
+      actorId: userId,
+      ip: meta.ip,
+      userAgent: meta.userAgent,
+    });
+  }
 }
 
 export function logout(sessionId, meta = {}) {
@@ -243,13 +392,15 @@ export function logout(sessionId, meta = {}) {
 /* Portfolio & Document Authorisation                                  */
 /* ------------------------------------------------------------------ */
 
-/**
- * SEC-001: Private M007 portfolio requires an authenticated administrator or
- * explicitly designated reviewer account. Anonymous and student access are denied.
- */
 export function canViewPortfolio(user) {
   if (!user || user.disabled_at) return false;
   return user.role === "admin" || user.role === "reviewer";
+}
+
+export async function getEntitlementAsync(actor, userId, documentId) {
+  if (!userId || !documentId) return null;
+  const adapter = await getPersistenceAdapter();
+  return adapter.getEntitlement(actor || { id: userId, role: "student" }, userId, documentId);
 }
 
 export function getEntitlement(userId, documentId) {
@@ -278,6 +429,12 @@ export function evaluateEntitlement(entitlement) {
   return { allowed: true, reason: "active" };
 }
 
+export async function canReadDocumentAsync(user, documentId) {
+  if (!user) return { allowed: false, reason: "unauthenticated" };
+  const entitlement = await getEntitlementAsync(user, user.id, documentId);
+  return { ...evaluateEntitlement(entitlement), entitlement };
+}
+
 export function canReadDocument(user, documentId) {
   if (!user) return { allowed: false, reason: "unauthenticated" };
   const entitlement = getEntitlement(user.id, documentId);
@@ -285,7 +442,7 @@ export function canReadDocument(user, documentId) {
 }
 
 /* ------------------------------------------------------------------ */
-/* SEC-005: Single-use Page Tokens & Bounded-Window Audio Stream Tokens*/
+/* SEC-005: Crash-Safe Single-Use Page Tokens & Audio Stream Tokens    */
 /* ------------------------------------------------------------------ */
 
 export function issuePageToken(user, documentId, page, entitlementVersion) {
@@ -305,14 +462,27 @@ export function verifyPageToken(token) {
   return verifyToken(token, "page");
 }
 
-/**
- * Verify AND atomically redeem a single-use page token (`jti`).
- * Any subsequent replay of the same `X-Page-Token` raises TokenError("token_replayed").
- */
+export async function redeemPageTokenAsync(token) {
+  const claims = verifyToken(token, "page");
+  if (!claims.jti) {
+    throw new TokenError("malformed", "Page token is missing jti.");
+  }
+  const adapter = await getPersistenceAdapter();
+  const redeemed = await adapter.redeemSingleUseToken(claims.jti, Number(claims.exp));
+  if (!redeemed) {
+    throw new TokenError("token_replayed", "Page token has already been redeemed.");
+  }
+  return claims;
+}
+
 export function redeemPageToken(token) {
   const claims = verifyToken(token, "page");
   if (!claims.jti) {
     throw new TokenError("malformed", "Page token is missing jti.");
+  }
+  const syncAdapter = getActivePersistenceAdapterSync();
+  if (!syncAdapter || syncAdapter.kind !== "sqlite") {
+    throw new Error("redeemPageToken() sync helper requires SQLite; use redeemPageTokenAsync().");
   }
   const db = getDb();
   const nowSec = Math.floor(Date.now() / 1000);
@@ -331,11 +501,6 @@ export function redeemPageToken(token) {
   return claims;
 }
 
-/**
- * Issue a bounded-window (`60s` TTL) signed audio stream token bound to user,
- * document, chapter/page, and entitlement version. Multi-request HTTP 206 Range
- * playback is permitted within the active window until expiry or revocation.
- */
 export function issueAudioToken(user, documentId, page, entitlementVersion, chapterId = null) {
   return signToken(
     {

@@ -1,18 +1,51 @@
 /**
- * Document, entitlement, chapter and progress services.
+ * Document, entitlement, chapter and progress services across PostgreSQL & SQLite (Mission 005).
  *
- * All authorisation decisions consult `canReadDocument` from the security
- * module. No route reaches the storage layer without passing through here.
+ * Asynchronous `...Async` methods execute through the active `PersistenceAdapter`
+ * (enforcing transaction-local PostgreSQL RLS under `cv_runtime` or SQLite queries).
+ * Synchronous helpers remain available for SQLite-mode unit tests.
  */
 
 import { getDb, nowIso, transaction } from "../db.js";
 import { newId } from "../security/crypto.js";
-import { audit } from "../security/audit.js";
+import { audit, auditAsync } from "../security/audit.js";
 import { evaluateEntitlement } from "../security/authz.js";
+import { getPersistenceAdapter } from "../persistence/adapter.js";
 
 /* ------------------------------------------------------------------ */
 /* Documents                                                           */
 /* ------------------------------------------------------------------ */
+
+export async function createDocumentAsync(
+  actor,
+  {
+    titleEn,
+    titleZh = null,
+    author = null,
+    description = null,
+    storageKey,
+    contentHash,
+    byteSize,
+    pageCount,
+    synthetic = true,
+    uploadedBy,
+  },
+) {
+  const adapter = await getPersistenceAdapter();
+  return adapter.createDocument(actor || { id: uploadedBy, role: "admin" }, {
+    id: newId("doc"),
+    titleEn,
+    titleZh,
+    author,
+    description,
+    storageKey,
+    contentHash,
+    byteSize,
+    pageCount,
+    synthetic,
+    uploadedBy,
+  });
+}
 
 export function createDocument({
   titleEn,
@@ -51,6 +84,12 @@ export function createDocument({
   return findDocument(id);
 }
 
+export async function findDocumentAsync(actor, id) {
+  if (!id) return null;
+  const adapter = await getPersistenceAdapter();
+  return adapter.findDocument(actor, id);
+}
+
 export function findDocument(id) {
   if (!id) return null;
   return (
@@ -63,6 +102,11 @@ export function findDocument(id) {
       )
       .get(id) ?? null
   );
+}
+
+export async function listDocumentsAsync(actor) {
+  const adapter = await getPersistenceAdapter();
+  return adapter.listDocuments(actor || { role: "admin" });
 }
 
 export function listDocuments() {
@@ -79,11 +123,21 @@ export function listDocuments() {
     .all();
 }
 
-/**
- * Documents a student may currently read.
- * The SQL narrows candidates; evaluateEntitlement makes the final decision so
- * expiry logic cannot drift between list and read paths.
- */
+export async function listReadableDocumentsAsync(user) {
+  if (!user) return [];
+  const adapter = await getPersistenceAdapter();
+  const rows = await adapter.listReadableDocuments(user);
+  return rows
+    .filter((row) => {
+      if (!("entitlement_status" in row)) return true;
+      return evaluateEntitlement({
+        status: row.entitlement_status,
+        expires_at: row.expires_at,
+      }).allowed;
+    })
+    .map(({ storage_key: _sk, content_hash: _ch, ...rest }) => rest);
+}
+
 export function listReadableDocuments(user) {
   if (!user) return [];
   const rows = getDb()
@@ -112,12 +166,41 @@ export function listReadableDocuments(user) {
       });
       return verdict.allowed;
     })
-    .map(({ storage_key, ...rest }) => rest);
+    .map(({ storage_key: _sk, ...rest }) => rest);
 }
 
 /* ------------------------------------------------------------------ */
 /* Chapters                                                            */
 /* ------------------------------------------------------------------ */
+
+export async function addChapterAsync(
+  actor,
+  {
+    documentId,
+    ordinal,
+    titleEn,
+    titleZh = null,
+    startPage,
+    endPage,
+    audioKey = null,
+    audioMime = null,
+    audioSeconds = null,
+  },
+) {
+  const adapter = await getPersistenceAdapter();
+  return adapter.addChapter(actor || { role: "admin" }, {
+    id: newId("chap"),
+    documentId,
+    ordinal,
+    titleEn,
+    titleZh,
+    startPage,
+    endPage,
+    audioKey,
+    audioMime,
+    audioSeconds,
+  });
+}
 
 export function addChapter({
   documentId,
@@ -153,6 +236,12 @@ export function addChapter({
   return id;
 }
 
+export async function listChaptersAsync(actor, documentId) {
+  if (!documentId) return [];
+  const adapter = await getPersistenceAdapter();
+  return adapter.listChapters(actor, documentId);
+}
+
 export function listChapters(documentId) {
   if (!documentId) return [];
   return getDb()
@@ -162,6 +251,12 @@ export function listChapters(documentId) {
        FROM chapters WHERE document_id = ? ORDER BY ordinal`,
     )
     .all(documentId);
+}
+
+export async function findChapterForPageAsync(actor, documentId, page) {
+  if (!documentId) return null;
+  const adapter = await getPersistenceAdapter();
+  return adapter.findChapterForPage(actor, documentId, page);
 }
 
 export function findChapterForPage(documentId, page) {
@@ -177,6 +272,12 @@ export function findChapterForPage(documentId, page) {
   );
 }
 
+export async function findChapterByIdAsync(actor, documentId, chapterId) {
+  if (!documentId || !chapterId) return null;
+  const adapter = await getPersistenceAdapter();
+  return adapter.findChapterById(actor, documentId, chapterId);
+}
+
 export function findChapterById(documentId, chapterId) {
   if (!documentId || !chapterId) return null;
   return (
@@ -184,6 +285,20 @@ export function findChapterById(documentId, chapterId) {
       .prepare("SELECT * FROM chapters WHERE document_id = ? AND id = ?")
       .get(documentId, chapterId) ?? null
   );
+}
+
+export async function attachChapterAudioAsync(
+  actor,
+  { documentId, chapterId, audioKey, audioMime = "audio/wav", audioSeconds = null },
+) {
+  const adapter = await getPersistenceAdapter();
+  return adapter.attachChapterAudio(actor || { role: "admin" }, {
+    documentId,
+    chapterId,
+    audioKey,
+    audioMime,
+    audioSeconds,
+  });
 }
 
 export function attachChapterAudio({
@@ -207,11 +322,42 @@ export function attachChapterAudio({
 /* Entitlements                                                        */
 /* ------------------------------------------------------------------ */
 
-/**
- * Grant or re-grant access. Granting an already-active entitlement is a no-op
- * unless the expiry changes. Every mutation bumps `version`, which invalidates
- * any page token already issued.
- */
+export async function grantEntitlementAsync(
+  actor,
+  { userId, documentId, grantedBy, expiresAt = null, reason = "admin_grant" },
+) {
+  const adapter = await getPersistenceAdapter();
+  const effectiveActor = actor || { id: grantedBy, role: "admin" };
+  const result = await adapter.grantEntitlement(effectiveActor, {
+    id: newId("ent"),
+    userId,
+    documentId,
+    grantedBy,
+    expiresAt,
+  });
+
+  if (result.changed) {
+    await auditAsync(
+      {
+        event: "entitlement.grant",
+        outcome: "allow",
+        actorId: grantedBy,
+        actorRole: "admin",
+        subjectId: userId,
+        documentId,
+        detail: {
+          ...(result.previousStatus ? { previousStatus: result.previousStatus } : {}),
+          expiresAt,
+          reason,
+          mode: result.mode,
+        },
+      },
+      effectiveActor,
+    );
+  }
+  return { changed: result.changed, entitlement: result.entitlement };
+}
+
 export function grantEntitlement({
   userId,
   documentId,
@@ -252,9 +398,7 @@ export function grantEntitlement({
       });
       return {
         changed: true,
-        entitlement: db
-          .prepare("SELECT * FROM entitlements WHERE id = ?")
-          .get(existing.id),
+        entitlement: db.prepare("SELECT * FROM entitlements WHERE id = ?").get(existing.id),
       };
     }
 
@@ -282,7 +426,36 @@ export function grantEntitlement({
   });
 }
 
-/** Revoke access. Idempotent; returns whether a change occurred. */
+export async function revokeEntitlementAsync(
+  actor,
+  { userId, documentId, revokedBy, reason = "admin_revoke" },
+) {
+  const adapter = await getPersistenceAdapter();
+  const effectiveActor = actor || { id: revokedBy, role: "admin" };
+  const result = await adapter.revokeEntitlement(effectiveActor, {
+    userId,
+    documentId,
+    revokedBy,
+    reason,
+  });
+
+  if (result.changed) {
+    await auditAsync(
+      {
+        event: "entitlement.revoke",
+        outcome: "allow",
+        actorId: revokedBy,
+        actorRole: "admin",
+        subjectId: userId,
+        documentId,
+        detail: { reason, previousStatus: result.previousStatus },
+      },
+      effectiveActor,
+    );
+  }
+  return result;
+}
+
 export function revokeEntitlement({
   userId,
   documentId,
@@ -308,7 +481,6 @@ export function revokeEntitlement({
        WHERE id = ?`,
     ).run(revokedBy, nowIso(), reason, existing.id);
 
-    // A revoked learner keeps a record of progress but loses all read access.
     audit({
       event: "entitlement.revoke",
       outcome: "allow",
@@ -321,11 +493,14 @@ export function revokeEntitlement({
 
     return {
       changed: true,
-      entitlement: db
-        .prepare("SELECT * FROM entitlements WHERE id = ?")
-        .get(existing.id),
+      entitlement: db.prepare("SELECT * FROM entitlements WHERE id = ?").get(existing.id),
     };
   });
+}
+
+export async function listEntitlementsForDocumentAsync(actor, documentId) {
+  const adapter = await getPersistenceAdapter();
+  return adapter.listEntitlementsForDocument(actor || { role: "admin" }, documentId);
 }
 
 export function listEntitlementsForDocument(documentId) {
@@ -345,6 +520,16 @@ export function listEntitlementsForDocument(documentId) {
 /* Reading progress                                                    */
 /* ------------------------------------------------------------------ */
 
+export async function recordProgressAsync(actor, { userId, documentId, page, pageCount }) {
+  const adapter = await getPersistenceAdapter();
+  return adapter.recordProgress(actor || { id: userId, role: "student" }, {
+    userId,
+    documentId,
+    page,
+    pageCount,
+  });
+}
+
 export function recordProgress({ userId, documentId, page, pageCount }) {
   const cap = Math.max(Number(pageCount) || 1, 1);
   const safePage = Math.min(Math.max(Number(page) || 1, 1), cap);
@@ -363,6 +548,11 @@ export function recordProgress({ userId, documentId, page, pageCount }) {
     .run(userId, documentId, safePage, nowIso(), cap);
 }
 
+export async function getProgressAsync(actor, userId, documentId) {
+  const adapter = await getPersistenceAdapter();
+  return adapter.getProgress(actor || { id: userId, role: "student" }, userId, documentId);
+}
+
 export function getProgress(userId, documentId) {
   return (
     getDb()
@@ -372,5 +562,3 @@ export function getProgress(userId, documentId) {
       .get(userId, documentId) ?? null
   );
 }
-
-
