@@ -29,6 +29,16 @@ DROP POLICY IF EXISTS chapters_backup_read ON public.chapters;
 DROP POLICY IF EXISTS progress_backup_read ON public.reading_progress;
 DROP POLICY IF EXISTS enquiries_backup_read ON public.portfolio_enquiries;
 DROP POLICY IF EXISTS audit_backup_read ON public.audit_log;
+DROP POLICY IF EXISTS users_owner_all ON public.users;
+DROP POLICY IF EXISTS sessions_owner_all ON public.sessions;
+DROP POLICY IF EXISTS documents_owner_all ON public.documents;
+DROP POLICY IF EXISTS chapters_owner_all ON public.chapters;
+DROP POLICY IF EXISTS entitlements_owner_all ON public.entitlements;
+DROP POLICY IF EXISTS progress_owner_all ON public.reading_progress;
+DROP POLICY IF EXISTS enquiries_owner_all ON public.portfolio_enquiries;
+DROP POLICY IF EXISTS audit_owner_all ON public.audit_log;
+DROP POLICY IF EXISTS token_redemptions_owner_all ON public.token_redemptions;
+DROP POLICY IF EXISTS rate_limit_buckets_owner_all ON public.rate_limit_buckets;
 
 ALTER TABLE public.token_redemptions DISABLE ROW LEVEL SECURITY;
 ALTER TABLE public.rate_limit_buckets DISABLE ROW LEVEL SECURITY;

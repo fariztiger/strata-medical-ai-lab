@@ -201,6 +201,38 @@ CREATE POLICY enquiries_backup_read ON public.portfolio_enquiries FOR SELECT TO 
 DROP POLICY IF EXISTS audit_backup_read ON public.audit_log;
 CREATE POLICY audit_backup_read ON public.audit_log FOR SELECT TO cv_backup_maint USING (true);
 
+-- Owner maintenance/disaster-recovery policies under FORCE ROW LEVEL SECURITY
+-- (`cv_owner` is NOLOGIN and strictly unreachable from `cv_runtime`)
+DROP POLICY IF EXISTS users_owner_all ON public.users;
+CREATE POLICY users_owner_all ON public.users FOR ALL TO cv_owner USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS sessions_owner_all ON public.sessions;
+CREATE POLICY sessions_owner_all ON public.sessions FOR ALL TO cv_owner USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS documents_owner_all ON public.documents;
+CREATE POLICY documents_owner_all ON public.documents FOR ALL TO cv_owner USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS chapters_owner_all ON public.chapters;
+CREATE POLICY chapters_owner_all ON public.chapters FOR ALL TO cv_owner USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS entitlements_owner_all ON public.entitlements;
+CREATE POLICY entitlements_owner_all ON public.entitlements FOR ALL TO cv_owner USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS progress_owner_all ON public.reading_progress;
+CREATE POLICY progress_owner_all ON public.reading_progress FOR ALL TO cv_owner USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS enquiries_owner_all ON public.portfolio_enquiries;
+CREATE POLICY enquiries_owner_all ON public.portfolio_enquiries FOR ALL TO cv_owner USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS audit_owner_all ON public.audit_log;
+CREATE POLICY audit_owner_all ON public.audit_log FOR ALL TO cv_owner USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS token_redemptions_owner_all ON public.token_redemptions;
+CREATE POLICY token_redemptions_owner_all ON public.token_redemptions FOR ALL TO cv_owner USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS rate_limit_buckets_owner_all ON public.rate_limit_buckets;
+CREATE POLICY rate_limit_buckets_owner_all ON public.rate_limit_buckets FOR ALL TO cv_owner USING (true) WITH CHECK (true);
+
 -- 7. Harden helper & SECURITY DEFINER functions (AUD-C3, safe search_path, REVOKE PUBLIC)
 CREATE OR REPLACE FUNCTION public.cv_current_user_id() RETURNS TEXT
 LANGUAGE sql STABLE SET search_path = pg_catalog, public AS $$
