@@ -1,0 +1,14 @@
+{
+  "name": "@strata/contentvault-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "STRATA ContentVault API - protected document access with server-side watermarking",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node src/server.js",
+    "seed": "node scripts/seed.js",
+    "test": "node --test tests/",
+    "test:acceptance": "node tests/acceptance.test.js"
+  }
+}

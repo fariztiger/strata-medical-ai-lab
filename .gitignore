@@ -1,0 +1,37 @@
+﻿
+# STRATA - Dependencies
+node_modules/
+vendor/pylibs/
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Cache and build output
+.cache/
+dist/
+build/
+.pytest_cache/
+
+# Runtime and private storage
+var/
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+*.log
+
+# Secrets and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.dev-signing-secret
+credentials.json
+secrets.json
+
+# OS files
+.DS_Store
+Thumbs.db
