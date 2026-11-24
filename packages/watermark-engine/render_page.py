@@ -55,18 +55,27 @@ def fail(code: str, message: str) -> None:
     raise SystemExit(2)
 
 
-def load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+def load_font(size: int, text: str = "") -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     """
     Prefer a real TrueType face for legibility; fall back to the bundled
     bitmap font so the engine still works on a minimal machine.
     """
-    candidates = [
+    needs_cjk = any(ord(ch) > 0x2E80 for ch in text)
+    cjk_candidates = [
+        r"C:\Windows\Fonts\msyh.ttc",
+        r"C:\Windows\Fonts\simhei.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/System/Library/Fonts/PingFang.ttc",
+    ]
+    latin_candidates = [
         r"C:\Windows\Fonts\segoeui.ttf",
         r"C:\Windows\Fonts\arial.ttf",
         r"C:\Windows\Fonts\calibri.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/System/Library/Fonts/Supplemental/Arial.ttf",
     ]
+    candidates = (cjk_candidates + latin_candidates) if needs_cjk else latin_candidates
     for path in candidates:
         if os.path.isfile(path):
             try:
@@ -74,6 +83,19 @@ def load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
             except OSError:
                 continue
     return ImageFont.load_default()
+
+
+def has_cjk_font() -> bool:
+    for path in (
+        r"C:\Windows\Fonts\msyh.ttc",
+        r"C:\Windows\Fonts\simhei.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/System/Library/Fonts/PingFang.ttc",
+    ):
+        if os.path.isfile(path):
+            return True
+    return False
 
 
 def probe(path: str) -> dict:
@@ -106,7 +128,12 @@ def watermark_text(identity: dict, page_number: int, total: int) -> str:
     The caller (Node API) constructs `identity` from the authenticated session
     row. A client cannot inject this string.
     """
-    label = str(identity.get("label") or "").strip()[:60]
+    raw_label = str(identity.get("label") or "").strip()[:60]
+    if raw_label and any(ord(ch) > 0x2E80 for ch in raw_label) and not has_cjk_font():
+        ascii_only = "".join(ch for ch in raw_label if ord(ch) < 0x2E80).strip(" -·()")
+        label = ascii_only or "Learner"
+    else:
+        label = raw_label
     ref = str(identity.get("ref") or "").strip()[:40]
     stamp = str(identity.get("stamp") or "").strip()[:32]
     parts = [label, ref, f"p.{page_number}/{total}", stamp]
@@ -121,7 +148,7 @@ def apply_watermark(image: Image.Image, mark: str, page_number: int, total: int)
     draw = ImageDraw.Draw(overlay)
 
     font_size = max(12, int(min(width, height) / 34))
-    font = load_font(font_size)
+    font = load_font(font_size, mark)
 
     # Measure once, then lay out a staggered grid across the whole surface so
     # the identity recurs everywhere and cannot be cropped away in one place.
@@ -153,7 +180,7 @@ def apply_watermark(image: Image.Image, mark: str, page_number: int, total: int)
 
     # Edge stamp: survives a tight crop of the body text.
     edge_size = max(10, int(min(width, height) / 60))
-    edge_font = load_font(edge_size)
+    edge_font = load_font(edge_size, mark)
     edge_mark = f"STRATA ContentVault · {mark}"
     draw.rectangle(
         [(0, height - edge_size * 2 - 8), (width, height)],
@@ -176,6 +203,8 @@ def render(
     identity: dict,
     max_dimension: int = MAX_DIMENSION,
     with_watermark: bool = True,
+    cache_dir: str | None = None,
+    content_hash: str | None = None,
 ) -> dict:
     if not os.path.isfile(path):
         fail("missing_file", "PDF file not found.")
@@ -191,15 +220,55 @@ def render(
         if page_number < 1 or page_number > total:
             fail("bad_page", f"Page {page_number} is outside 1..{total}.")
 
-        page = doc[page_number - 1]
-        rect = page.rect
-        zoom = dpi / 72.0
-        longest = max(rect.width, rect.height) * zoom
-        if longest > max_dimension and longest > 0:
-            zoom = max_dimension / max(rect.width, rect.height)
+        cache_hit = False
+        cache_file = None
+        if cache_dir:
+            try:
+                os.makedirs(cache_dir, exist_ok=True)
+                doc_digest = content_hash or hashlib.sha256(open(path, "rb").read()).hexdigest()
+                key_raw = f"{doc_digest}:p{page_number}:dpi{dpi}:max{max_dimension}:v1"
+                cache_key = hashlib.sha256(key_raw.encode("utf-8")).hexdigest()
+                cache_file = os.path.join(cache_dir, f"base_{cache_key}.png")
+            except OSError:
+                cache_file = None
 
-        pixmap = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
-        image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
+        image: Image.Image | None = None
+        if cache_file and os.path.isfile(cache_file):
+            try:
+                with Image.open(cache_file) as cached_img:
+                    image = cached_img.convert("RGB")
+                cache_hit = True
+            except Exception:
+                image = None
+
+        if image is None:
+            page = doc[page_number - 1]
+            rect = page.rect
+            zoom = dpi / 72.0
+            longest = max(rect.width, rect.height) * zoom
+            if longest > max_dimension and longest > 0:
+                zoom = max_dimension / max(rect.width, rect.height)
+
+            pixmap = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+            image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
+
+            # Store ONLY the unwatermarked base raster in cache (ADR-002).
+            if cache_file:
+                tmp_cache = f"{cache_file}.{os.getpid()}.tmp"
+                try:
+                    with open(tmp_cache, "wb") as fh:
+                        image.save(fh, format="PNG", optimize=False)
+                    try:
+                        os.chmod(tmp_cache, 0o600)
+                    except OSError:
+                        pass
+                    os.replace(tmp_cache, cache_file)
+                except OSError:
+                    try:
+                        if os.path.exists(tmp_cache):
+                            os.unlink(tmp_cache)
+                    except OSError:
+                        pass
 
         mark = watermark_text(identity, page_number, total)
         if with_watermark:
@@ -219,6 +288,7 @@ def render(
             "sha256": hashlib.sha256(png_bytes).hexdigest(),
             "watermark": mark if with_watermark else None,
             "renderMs": int((time.perf_counter() - started) * 1000),
+            "cacheHit": cache_hit,
         }
     finally:
         doc.close()
@@ -267,6 +337,8 @@ def main() -> None:
                 request.get("identity") or {},
                 int(request.get("maxDimension") or MAX_DIMENSION),
                 bool(request.get("watermark", True)),
+                str(request.get("cacheDir")) if request.get("cacheDir") else None,
+                str(request.get("contentHash")) if request.get("contentHash") else None,
             )
         elif command == "selftest":
             result = selftest(

@@ -6,7 +6,7 @@
  */
 
 import crypto from "node:crypto";
-import { SIGNING_SECRET } from "\.\./config.js";
+import { SIGNING_SECRET } from "../config.js";
 
 const SCRYPT_PARAMS = { N: 16384, r: 8, p: 1, keylen: 64 };
 

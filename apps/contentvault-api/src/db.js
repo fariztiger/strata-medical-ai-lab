@@ -10,7 +10,7 @@
  */
 
 import { DatabaseSync } from "node:sqlite";
-import { DB_PATH, ensureDirs } from "\.\./config.js";
+import { DB_PATH, ensureDirs } from "./config.js";
 
 let db = null;
 

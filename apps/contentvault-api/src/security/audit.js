@@ -6,7 +6,7 @@
  * successes - they are the evidence that controls actually fire.
  */
 
-import { getDb, nowIso } from "./db.js";
+import { getDb, nowIso } from "../db.js";
 import { newId } from "./crypto.js";
 
 /**
@@ -51,7 +51,12 @@ export function audit(entry) {
   }
 }
 
-export function listAudit({ limit = 100, documentId = null, event = null } = {}) {
+export function listAudit({
+  limit = 100,
+  documentId = null,
+  event = null,
+  outcome = null,
+} = {}) {
   const clauses = [];
   const params = [];
   if (documentId) {
@@ -61,6 +66,10 @@ export function listAudit({ limit = 100, documentId = null, event = null } = {})
   if (event) {
     clauses.push("event = ?");
     params.push(event);
+  }
+  if (outcome) {
+    clauses.push("outcome = ?");
+    params.push(outcome);
   }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 500);

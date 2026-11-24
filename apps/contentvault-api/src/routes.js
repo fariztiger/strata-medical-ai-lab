@@ -2,37 +2,45 @@
  * ContentVault HTTP routes.
  *
  * Core security principle: the client's only authenticated identity is the
- * `cv_session` cookie, resolved server-side to a user row. No client field is
- * ever accepted as an identity or role.
+ * server-side session (`cv_session` cookie), resolved in SQLite on every
+ * request. No client field, query parameter, or custom identity header is
+ * ever trusted as a user identity or role.
  */
 
-import { createServer } from "node:http";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import crypto from "node:crypto";
 import {
   readJson,
   readRawBody,
   sendJson,
   sendBuffer,
   sendError,
-  sendText,
   parseCookies,
   serializeCookie,
   clearCookie,
+  isSecureRequest,
   rateLimit,
   clientIp,
-  htmlSecurityHeaders,
   protectedAssetHeaders,
-  isSameOriginMutating,
 } from "./http/helpers.js";
 import {
+  SESSION_COOKIE,
   createUser,
   findUserById,
+  findUserByEmail,
+  listUsers,
   login,
   logout,
   resolveSession,
   canReadDocument,
   issuePageToken,
   verifyPageToken,
+  issueAudioToken,
+  verifyAudioToken,
+} from "./security/authz.js";
+import {
   grantEntitlement,
   revokeEntitlement,
   findDocument,
@@ -42,26 +50,56 @@ import {
   addChapter,
   listChapters,
   findChapterForPage,
+  findChapterById,
+  attachChapterAudio,
   recordProgress,
   getProgress,
   listEntitlementsForDocument,
-  listUsers,
 } from "./services/content.js";
-import { probePdf, renderWatermarkedPage, engineSelftest } from "./services/pdf-engine.js";
-import { putPrivateObject, readPrivateObjectSync } from "./services/storage.js";
-import { audit } from "./security/audit.js";
-import { nowIso } from "./db.js";
-import { SESSION_COOKIE, PAGE_TOKEN_TTL_SECONDS } from "\.\./config.js";
+import {
+  probePdf,
+  renderWatermarkedPage,
+  engineSelftest,
+} from "./services/pdf-engine.js";
+import {
+  putPrivateObject,
+  readPrivateObjectSync,
+  privateObjectExists,
+  keyToPath,
+} from "./services/storage.js";
+import { audit, listAudit } from "./security/audit.js";
+import { getDb, nowIso } from "./db.js";
+import {
+  PAGE_TOKEN_TTL_SECONDS,
+  AUDIO_TOKEN_TTL_SECONDS,
+  SESSION_IDLE_MINUTES,
+  MAX_UPLOAD_BYTES,
+  MAX_PDF_PAGES,
+  SEED_MANIFEST_PATH,
+} from "./config.js";
 
 /**
  * Resolves the seeded synthetic demo document.
- * Populated by server.js at startup from the seed script output or by an
- * explicit environment variable.
+ * Populated by server.js / seed manifest or explicit env variable.
  */
 let demoDocId = null;
 
 export function requireDemoDocId() {
-  return demoDocId || process.env.CV_DEMO_DOCUMENT_ID || null;
+  if (demoDocId) return demoDocId;
+  if (process.env.CV_DEMO_DOCUMENT_ID) return process.env.CV_DEMO_DOCUMENT_ID;
+  try {
+    if (fs.existsSync(SEED_MANIFEST_PATH)) {
+      const parsed = JSON.parse(fs.readFileSync(SEED_MANIFEST_PATH, "utf8"));
+      if (parsed?.demoDocumentId) {
+        demoDocId = parsed.demoDocumentId;
+        return demoDocId;
+      }
+    }
+  } catch {
+    /* ignore unreadable manifest */
+  }
+  const docs = listDocuments();
+  return docs.length > 0 ? docs[0].id : null;
 }
 
 export function setDemoDocId(id) {
@@ -77,7 +115,7 @@ export function userAgent(req) {
 }
 
 function parseQuery(url) {
-  const parsed = new URL(url, "http://localhost");
+  const parsed = new URL(url || "/", "http://localhost");
   const query = Object.create(null);
   parsed.searchParams.forEach((value, key) => {
     query[key] = value;
@@ -85,13 +123,35 @@ function parseQuery(url) {
   return query;
 }
 
+function decodeHeaderText(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return "";
+  try {
+    return decodeURIComponent(text).trim();
+  } catch {
+    return text;
+  }
+}
+
+function safeDocument(doc) {
+  if (!doc) return null;
+  const { storage_key: _sk, content_hash: _ch, ...publicFields } = doc;
+  return publicFields;
+}
+
 /**
- * Resolve the authenticated user from the session cookie.
+ * Resolve the authenticated user from the server-side session.
  * Returns null if there is no valid session.
  */
 export function currentUser(req) {
   const cookies = parseCookies(req);
-  const sessionId = cookies[SESSION_COOKIE];
+  let sessionId = cookies[SESSION_COOKIE];
+  if (!sessionId && process.env.CV_ALLOW_FRAME_EMBED === "1") {
+    const fallback = req.headers["x-cv-session"];
+    if (typeof fallback === "string" && fallback.length > 0) {
+      sessionId = fallback.trim();
+    }
+  }
   if (!sessionId) return null;
   return resolveSession(sessionId);
 }
@@ -106,6 +166,35 @@ export function requireAdmin(req) {
   return user.role === "admin" ? user : null;
 }
 
+function ensureAdmin(req, res, eventName) {
+  const user = currentUser(req);
+  if (!user) {
+    audit({
+      event: eventName,
+      outcome: "deny",
+      ip: extractIp(req),
+      userAgent: userAgent(req),
+      detail: { reason: "unauthenticated" },
+    });
+    sendError(res, 401, "not_authenticated", "No valid session.");
+    return null;
+  }
+  if (user.role !== "admin") {
+    audit({
+      event: eventName,
+      outcome: "deny",
+      actorId: user.id,
+      actorRole: user.role,
+      ip: extractIp(req),
+      userAgent: userAgent(req),
+      detail: { reason: "admin_required" },
+    });
+    sendError(res, 403, "admin_required", "Administrator privileges are required.");
+    return null;
+  }
+  return user;
+}
+
 function notFound(res) {
   sendError(res, 404, "not_found", "Route not found.");
 }
@@ -115,36 +204,50 @@ function methodNotAllowed(res, allowed) {
   sendError(res, 405, "method_not_allowed", `Allowed methods: ${allowed}.`);
 }
 
+function writeTempBuffer(buffer, subdir, ext = "pdf") {
+  const tmpDir = path.join(os.tmpdir(), subdir);
+  fs.mkdirSync(tmpDir, { recursive: true });
+  const file = path.join(tmpDir, `${crypto.randomBytes(12).toString("hex")}.${ext}`);
+  fs.writeFileSync(file, buffer, { mode: 0o600 });
+  return file;
+}
+
 /* ------------------------------------------------------------------ */
 /* Auth routes                                                         */
 /* ------------------------------------------------------------------ */
 
-function handleAuth(req, res) {
-  const { url } = req;
-  const match = url.match(/^\/api\/auth\/?(?:(?<action>\w+))?/);
-  const action = match && match.groups ? match.groups.action : null;
+async function handleAuth(req, res) {
+  const parsed = new URL(req.url || "/", "http://localhost");
+  const match = parsed.pathname.match(/^\/api\/auth\/?(?<action>[a-z0-9_-]+)?$/i);
+  const action = match?.groups?.action || null;
 
-  if (req.method === "POST" && action === "login") {
+  if (action === "login") {
+    if (req.method !== "POST") return methodNotAllowed(res, "POST");
     return handleLogin(req, res);
   }
-  if (req.method === "POST" && action === "logout") {
+  if (action === "logout") {
+    if (req.method !== "POST") return methodNotAllowed(res, "POST");
     return handleLogout(req, res);
   }
-  if (req.method === "GET" && action === "me") {
+  if (action === "me") {
+    if (req.method !== "GET") return methodNotAllowed(res, "GET");
     return handleMe(req, res);
   }
-  if (action === "register" && req.method === "POST") {
+  if (action === "register") {
+    if (req.method !== "POST") return methodNotAllowed(res, "POST");
     return handleRegister(req, res);
   }
-  notFound(res);
+  return notFound(res);
 }
 
 async function handleLogin(req, res) {
   const meta = { ip: extractIp(req), userAgent: userAgent(req) };
-  const limiter = rateLimit(`login:${meta.ip}`, 10, 60);
+  const limiter = rateLimit(`login:${meta.ip}`, 25, 60);
   if (!limiter.allowed) {
     res.setHeader("Retry-After", String(limiter.retryAfter || 60));
-    return sendError(res, 429, "rate_limited", "Too many login attempts.", { retryAfter: limiter.retryAfter });
+    return sendError(res, 429, "rate_limited", "Too many login attempts.", {
+      retryAfter: limiter.retryAfter,
+    });
   }
 
   let body;
@@ -154,11 +257,21 @@ async function handleLogin(req, res) {
     return sendError(res, error.statusCode || 400, "bad_request", error.message);
   }
 
+  if (typeof body.email !== "string" || typeof body.password !== "string") {
+    return sendError(res, 400, "bad_request", "Email and password are required.");
+  }
+
   let session;
   try {
     session = login({ email: body.email, password: body.password, ...meta });
   } catch (error) {
-    audit({ event: "auth.login", outcome: "error", ip: meta.ip, userAgent: meta.userAgent, detail: { error: error.message } });
+    audit({
+      event: "auth.login",
+      outcome: "error",
+      ip: meta.ip,
+      userAgent: meta.userAgent,
+      detail: { error: error.message },
+    });
     return sendError(res, 400, "login_error", error.message);
   }
 
@@ -166,26 +279,38 @@ async function handleLogin(req, res) {
     return sendError(res, 401, "invalid_credentials", "Email or password is incorrect.");
   }
 
-  const idleMs =
-    Number(process.env.CV_SESSION_IDLE_MINUTES || 120) * 60 * 1000;
+  const idleSeconds = SESSION_IDLE_MINUTES * 60;
+  const secure = isSecureRequest(req);
+  const embedMode = process.env.CV_ALLOW_FRAME_EMBED === "1";
+
   res.setHeader(
     "Set-Cookie",
     serializeCookie(SESSION_COOKIE, session.sessionId, {
-      maxAge: idleMs / 1000,
+      maxAge: idleSeconds,
       httpOnly: true,
-      secure: false, // Set true behind HTTPS in production
-      sameSite: "Strict",
+      secure: embedMode ? secure : secure,
+      sameSite: embedMode && secure ? "None" : "Strict",
+      partitioned: Boolean(embedMode && secure),
     }),
   );
-  return sendJson(res, 200, { ok: true, user: session.user });
+
+  const responsePayload = { ok: true, user: session.user };
+  if (embedMode) {
+    responsePayload.previewSession = session.sessionId;
+  }
+  return sendJson(res, 200, responsePayload);
 }
 
 async function handleLogout(req, res) {
-  const user = currentUser(req);
   const meta = { ip: extractIp(req), userAgent: userAgent(req) };
   const cookies = parseCookies(req);
-  if (cookies[SESSION_COOKIE]) {
-    logout(cookies[SESSION_COOKIE], meta);
+  const sid =
+    cookies[SESSION_COOKIE] ||
+    (process.env.CV_ALLOW_FRAME_EMBED === "1"
+      ? String(req.headers["x-cv-session"] || "").trim()
+      : "");
+  if (sid) {
+    logout(sid, meta);
   }
   res.setHeader("Set-Cookie", clearCookie(SESSION_COOKIE));
   return sendJson(res, 200, { ok: true });
@@ -200,11 +325,9 @@ async function handleMe(req, res) {
 }
 
 async function handleRegister(req, res) {
-  const user = currentUser(req);
-  // Registration is admin-only in this prototype (no open sign-up).
-  if (!user || user.role !== "admin") {
-    return sendError(res, 403, "admin_required", "Only administrators may register accounts.");
-  }
+  const admin = ensureAdmin(req, res, "admin.user.register");
+  if (!admin) return;
+
   let body;
   try {
     body = await readJson(req);
@@ -217,7 +340,12 @@ async function handleRegister(req, res) {
     typeof body.displayName !== "string" ||
     !["admin", "student"].includes(body.role)
   ) {
-    return sendError(res, 400, "bad_request", "email, password, displayName and role (admin|student) are required.");
+    return sendError(
+      res,
+      400,
+      "bad_request",
+      "email, password, displayName and role (admin|student) are required.",
+    );
   }
   try {
     const created = createUser({
@@ -225,19 +353,29 @@ async function handleRegister(req, res) {
       password: body.password,
       displayName: body.displayName,
       role: body.role,
-      locale: body.locale || "en",
+      locale: body.locale === "zh" ? "zh" : "en",
     });
     audit({
       event: "admin.user.register",
       outcome: "allow",
-      actorId: user.id,
+      actorId: admin.id,
       actorRole: "admin",
       subjectId: created.id,
-      detail: { email: body.email, role: body.role },
+      ip: extractIp(req),
+      userAgent: userAgent(req),
+      detail: { email: created.email, role: created.role },
     });
     return sendJson(res, 201, { ok: true, user: created });
   } catch (error) {
-    audit({ event: "admin.user.register", outcome: "deny", actorId: user.id, actorRole: "admin", detail: { error: error.message } });
+    audit({
+      event: "admin.user.register",
+      outcome: "deny",
+      actorId: admin.id,
+      actorRole: "admin",
+      ip: extractIp(req),
+      userAgent: userAgent(req),
+      detail: { error: error.message },
+    });
     return sendError(res, 400, "registration_error", error.message);
   }
 }
@@ -253,7 +391,7 @@ async function handleDocuments(req, res) {
   if (req.method === "POST") {
     return handleUploadDocument(req, res);
   }
-  methodNotAllowed(res, "GET, POST");
+  return methodNotAllowed(res, "GET, POST");
 }
 
 async function handleListDocuments(req, res) {
@@ -261,35 +399,29 @@ async function handleListDocuments(req, res) {
   if (!user) {
     return sendError(res, 401, "not_authenticated", "No valid session.");
   }
-  let payload;
-  if (user.role === "admin") {
-    // Admins see all documents (the admin console). Entitlement checks happen
-    // at the page-render boundary, not here.
-    payload = listDocuments();
-  } else {
-    payload = listReadableDocuments(user);
-  }
-  return sendJson(res, 200, { ok: true, documents: payload });
+  const documents =
+    user.role === "admin" ? listDocuments() : listReadableDocuments(user);
+  return sendJson(res, 200, { ok: true, documents });
 }
 
 async function handleUploadDocument(req, res) {
-  const admin = requireAdmin(req);
-  if (!admin) {
-    return sendError(res, 403, "admin_required", "Only administrators may upload documents.");
-  }
+  const admin = ensureAdmin(req, res, "document.upload");
+  if (!admin) return;
 
   let body;
   try {
-    body = await readRawBody(req, 40 * 1024 * 1024);
+    body = await readRawBody(req, MAX_UPLOAD_BYTES);
   } catch (error) {
     return sendError(res, error.statusCode || 400, "bad_request", error.message);
   }
 
-  const titleEn = String(req.headers["x-title-en"] || "").trim();
-  const titleZh = String(req.headers["x-title-zh"] || "").trim() || null;
-  const author = String(req.headers["x-author"] || "").trim() || null;
-  const description = String(req.headers["x-description"] || "").trim() || null;
-  const contentType = String(req.headers["content-type"] || "");
+  const titleEn = decodeHeaderText(req.headers["x-title-en"]).slice(0, 200);
+  const titleZh = decodeHeaderText(req.headers["x-title-zh"]).slice(0, 200) || null;
+  const author = decodeHeaderText(req.headers["x-author"]).slice(0, 160) || null;
+  const description =
+    decodeHeaderText(req.headers["x-description"]).slice(0, 1000) || null;
+  const autoChapter = String(req.headers["x-auto-chapter"] || "") === "1";
+  const contentType = String(req.headers["content-type"] || "").toLowerCase();
 
   if (!titleEn) {
     return sendError(res, 400, "bad_request", "X-Title-En header is required.");
@@ -297,17 +429,49 @@ async function handleUploadDocument(req, res) {
   if (!contentType.includes("application/pdf")) {
     return sendError(res, 400, "bad_request", "Content-Type must be application/pdf.");
   }
-  if (!body.length) {
-    return sendError(res, 400, "bad_request", "Empty upload body.");
+  if (body.length < 8 || body.subarray(0, 5).toString("ascii") !== "%PDF-") {
+    audit({
+      event: "document.upload",
+      outcome: "deny",
+      actorId: admin.id,
+      actorRole: "admin",
+      ip: extractIp(req),
+      userAgent: userAgent(req),
+      detail: { reason: "not_a_pdf_header" },
+    });
+    return sendError(res, 400, "invalid_pdf", "Payload does not have a valid %PDF- header.");
   }
 
-  // Trust but verify: probe the actual PDF bytes before storing them.
+  const stagedFile = writeTempBuffer(body, "cv-uploads", "pdf");
   let probe;
   try {
-    probe = await probePdf(bufferToTempFile(body));
+    probe = await probePdf(stagedFile);
   } catch (error) {
-    audit({ event: "document.upload", outcome: "deny", actorId: admin.id, actorRole: "admin", detail: { error: error.message } });
+    audit({
+      event: "document.upload",
+      outcome: "deny",
+      actorId: admin.id,
+      actorRole: "admin",
+      ip: extractIp(req),
+      userAgent: userAgent(req),
+      detail: { error: error.message },
+    });
     return sendError(res, 400, "invalid_pdf", error.message);
+  } finally {
+    try {
+      fs.unlinkSync(stagedFile);
+    } catch {
+      /* ignore cleanup failure */
+    }
+  }
+
+  if (probe.pageCount > MAX_PDF_PAGES) {
+    return sendError(
+      res,
+      400,
+      "too_many_pages",
+      `PDF exceeds the ${MAX_PDF_PAGES}-page prototype limit.`,
+    );
   }
 
   try {
@@ -324,30 +488,45 @@ async function handleUploadDocument(req, res) {
       synthetic: true,
       uploadedBy: admin.id,
     });
+
+    if (autoChapter) {
+      addChapter({
+        documentId: document.id,
+        ordinal: 1,
+        titleEn: "Complete Module",
+        titleZh: "完整学习单元",
+        startPage: 1,
+        endPage: probe.pageCount,
+      });
+    }
+
     audit({
       event: "document.upload",
       outcome: "allow",
       actorId: admin.id,
       actorRole: "admin",
       documentId: document.id,
-      detail: { titleEn, pageCount: probe.pageCount, byteSize: storage.byteSize },
+      ip: extractIp(req),
+      userAgent: userAgent(req),
+      detail: {
+        titleEn,
+        pageCount: probe.pageCount,
+        byteSize: storage.byteSize,
+      },
     });
-    return sendJson(res, 201, { ok: true, document });
+    return sendJson(res, 201, { ok: true, document: safeDocument(document) });
   } catch (error) {
-    audit({ event: "document.upload", outcome: "error", actorId: admin.id, actorRole: "admin", detail: { error: error.message } });
+    audit({
+      event: "document.upload",
+      outcome: "error",
+      actorId: admin.id,
+      actorRole: "admin",
+      ip: extractIp(req),
+      userAgent: userAgent(req),
+      detail: { error: error.message },
+    });
     return sendError(res, 500, "upload_error", error.message);
   }
-}
-
-function bufferToTempFile(buffer) {
-  // The engine reads from a real filesystem path, so stage uploads there.
-  const fs = require("node:fs");
-  const crypto = require("node:crypto");
-  const tmpDir = require("node:path").join(require("os").tmpdir(), "cv-uploads");
-  fs.mkdirSync(tmpDir, { recursive: true });
-  const file = path.join(tmpDir, `${crypto.randomBytes(12).toString("hex")}.pdf`);
-  fs.writeFileSync(file, buffer);
-  return file;
 }
 
 /* ------------------------------------------------------------------ */
@@ -357,30 +536,86 @@ function bufferToTempFile(buffer) {
 async function handleDocumentDetail(req, res, id) {
   const user = currentUser(req);
   if (!user) {
+    audit({
+      event: "document.open",
+      outcome: "deny",
+      documentId: id,
+      ip: extractIp(req),
+      userAgent: userAgent(req),
+      detail: { reason: "unauthenticated" },
+    });
     return sendError(res, 401, "not_authenticated", "No valid session.");
   }
+
   const document = findDocument(id);
-  if (!document) {
+  if (!document || document.archived_at) {
+    if (user.role !== "admin") {
+      audit({
+        event: "document.open",
+        outcome: "deny",
+        actorId: user.id,
+        actorRole: user.role,
+        documentId: id,
+        ip: extractIp(req),
+        userAgent: userAgent(req),
+        detail: { reason: "not_found_or_unauthorized" },
+      });
+      return sendError(res, 403, "no_entitlement", "Access denied.");
+    }
     return sendError(res, 404, "not_found", "Document not found.");
+  }
+
+  const verdict = canReadDocument(user, id);
+  if (user.role !== "admin" && !verdict.allowed) {
+    audit({
+      event: "document.open",
+      outcome: "deny",
+      actorId: user.id,
+      actorRole: user.role,
+      documentId: id,
+      ip: extractIp(req),
+      userAgent: userAgent(req),
+      detail: { reason: verdict.reason },
+    });
+    return sendError(res, 403, verdict.reason, `Access denied: ${verdict.reason}.`);
   }
 
   const chapters = listChapters(id);
   const entitlements =
     user.role === "admin" ? listEntitlementsForDocument(id) : null;
+  const progress = getProgress(user.id, id);
+
+  audit({
+    event: "document.open",
+    outcome: "allow",
+    actorId: user.id,
+    actorRole: user.role,
+    documentId: id,
+    ip: extractIp(req),
+    userAgent: userAgent(req),
+  });
 
   return sendJson(res, 200, {
     ok: true,
-    document: { ...document, storage_key: undefined, content_hash: undefined },
+    document: safeDocument(document),
     chapters,
+    progress,
+    canRead: verdict.allowed,
+    entitlement: verdict.entitlement
+      ? {
+          id: verdict.entitlement.id,
+          status: verdict.entitlement.status,
+          version: verdict.entitlement.version,
+          expires_at: verdict.entitlement.expires_at,
+        }
+      : null,
     entitlements,
   });
 }
 
 async function handleGrantAccess(req, res, documentId) {
-  const admin = requireAdmin(req);
-  if (!admin) {
-    return sendError(res, 403, "admin_required", "Only administrators may grant access.");
-  }
+  const admin = ensureAdmin(req, res, "entitlement.grant");
+  if (!admin) return;
 
   let body;
   try {
@@ -389,8 +624,11 @@ async function handleGrantAccess(req, res, documentId) {
     return sendError(res, error.statusCode || 400, "bad_request", error.message);
   }
 
-  const user = findUserByEmail(body.email);
-  if (!user || user.role !== "student") {
+  const targetUser = body.userId
+    ? findUserById(String(body.userId))
+    : findUserByEmail(body.email);
+
+  if (!targetUser || targetUser.role !== "student") {
     return sendError(res, 404, "student_not_found", "Student account not found.");
   }
   const document = findDocument(documentId);
@@ -398,30 +636,47 @@ async function handleGrantAccess(req, res, documentId) {
     return sendError(res, 404, "not_found", "Document not found.");
   }
 
-  const expiresAt =
-    typeof body.expiresAt === "string" && body.expiresAt
-      ? body.expiresAt
-      : null;
+  let expiresAt = null;
+  if (typeof body.expiresAt === "string" && body.expiresAt.trim()) {
+    const parsedTime = Date.parse(body.expiresAt.trim());
+    if (!Number.isFinite(parsedTime)) {
+      return sendError(res, 400, "bad_request", "expiresAt must be a valid ISO-8601 timestamp.");
+    }
+    expiresAt = new Date(parsedTime).toISOString();
+  }
 
   try {
     const result = grantEntitlement({
-      userId: user.id,
+      userId: targetUser.id,
       documentId,
       grantedBy: admin.id,
       expiresAt,
+      reason: body.reason || "admin_grant",
     });
-    return sendJson(res, 200, { ok: true, entitlement: result.entitlement, changed: result.changed });
+    return sendJson(res, 200, {
+      ok: true,
+      entitlement: result.entitlement,
+      changed: result.changed,
+    });
   } catch (error) {
-    audit({ event: "entitlement.grant", outcome: "deny", actorId: admin.id, actorRole: "admin", subjectId: user.id, documentId, detail: { error: error.message } });
+    audit({
+      event: "entitlement.grant",
+      outcome: "deny",
+      actorId: admin.id,
+      actorRole: "admin",
+      subjectId: targetUser.id,
+      documentId,
+      ip: extractIp(req),
+      userAgent: userAgent(req),
+      detail: { error: error.message },
+    });
     return sendError(res, 500, "grant_error", error.message);
   }
 }
 
 async function handleRevokeAccess(req, res, documentId) {
-  const admin = requireAdmin(req);
-  if (!admin) {
-    return sendError(res, 403, "admin_required", "Only administrators may revoke access.");
-  }
+  const admin = ensureAdmin(req, res, "entitlement.revoke");
+  if (!admin) return;
 
   let body;
   try {
@@ -430,58 +685,164 @@ async function handleRevokeAccess(req, res, documentId) {
     return sendError(res, error.statusCode || 400, "bad_request", error.message);
   }
 
-  const user = findUserByEmail(body.email);
-  if (!user) {
+  const targetUser = body.userId
+    ? findUserById(String(body.userId))
+    : findUserByEmail(body.email);
+
+  if (!targetUser) {
     return sendError(res, 404, "student_not_found", "Student account not found.");
   }
 
   const result = revokeEntitlement({
-    userId: user.id,
+    userId: targetUser.id,
     documentId,
     revokedBy: admin.id,
-    reason: body.reason || "admin_revoke",
+    reason: typeof body.reason === "string" && body.reason.trim() ? body.reason.trim() : "admin_revoke",
   });
 
-  return sendJson(res, 200, { ok: true, changed: result.changed });
+  return sendJson(res, 200, {
+    ok: true,
+    changed: result.changed,
+    reason: result.reason || "revoked",
+    entitlement: result.entitlement || null,
+  });
 }
 
 /* ------------------------------------------------------------------ */
-/* Chapter routes                                                      */
+/* Chapter & chapter-audio management                                  */
 /* ------------------------------------------------------------------ */
 
 async function handleChapters(req, res, documentId) {
-  const admin = requireAdmin(req);
-  if (!admin) {
-    return sendError(res, 403, "admin_required", "Only administrators may manage chapters.");
-  }
   if (req.method === "GET") {
+    const user = currentUser(req);
+    if (!user) {
+      return sendError(res, 401, "not_authenticated", "No valid session.");
+    }
+    if (user.role !== "admin") {
+      const verdict = canReadDocument(user, documentId);
+      if (!verdict.allowed) {
+        return sendError(res, 403, verdict.reason, `Access denied: ${verdict.reason}.`);
+      }
+    }
     return sendJson(res, 200, { ok: true, chapters: listChapters(documentId) });
   }
+
   if (req.method === "POST") {
+    const admin = ensureAdmin(req, res, "chapter.create");
+    if (!admin) return;
+
+    const document = findDocument(documentId);
+    if (!document) {
+      return sendError(res, 404, "not_found", "Document not found.");
+    }
+
     let body;
     try {
       body = await readJson(req);
     } catch (error) {
       return sendError(res, error.statusCode || 400, "bad_request", error.message);
     }
+    const startPage = Math.max(1, Number(body.startPage || 1));
+    const endPage = Math.min(document.page_count, Math.max(startPage, Number(body.endPage || startPage)));
     const chapterId = addChapter({
       documentId,
       ordinal: Number(body.ordinal || 1),
-      titleEn: String(body.titleEn || "Untitled chapter"),
-      titleZh: body.titleZh ?? null,
-      startPage: Number(body.startPage || 1),
-      endPage: Number(body.endPage || 1),
+      titleEn: String(body.titleEn || "Untitled chapter").trim(),
+      titleZh: body.titleZh ? String(body.titleZh).trim() : null,
+      startPage,
+      endPage,
       audioKey: body.audioKey ?? null,
       audioMime: body.audioMime ?? null,
       audioSeconds: body.audioSeconds ?? null,
     });
+    audit({
+      event: "chapter.create",
+      outcome: "allow",
+      actorId: admin.id,
+      actorRole: "admin",
+      documentId,
+      ip: extractIp(req),
+      userAgent: userAgent(req),
+      detail: { chapterId, startPage, endPage },
+    });
     return sendJson(res, 201, { ok: true, chapterId });
   }
-  methodNotAllowed(res, "GET, POST");
+
+  return methodNotAllowed(res, "GET, POST");
+}
+
+async function handleUploadChapterAudio(req, res, documentId, chapterId) {
+  if (req.method !== "POST") {
+    return methodNotAllowed(res, "POST");
+  }
+  const admin = ensureAdmin(req, res, "chapter.audio.upload");
+  if (!admin) return;
+
+  const chapter = findChapterById(documentId, chapterId);
+  if (!chapter) {
+    return sendError(res, 404, "not_found", "Chapter not found.");
+  }
+
+  const contentType = String(req.headers["content-type"] || "").toLowerCase();
+  const allowedMimes = ["audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp3", "audio/ogg"];
+  const matchedMime = allowedMimes.find((m) => contentType.includes(m));
+  if (!matchedMime) {
+    return sendError(
+      res,
+      400,
+      "bad_request",
+      "Content-Type must be audio/wav, audio/mpeg, or audio/ogg.",
+    );
+  }
+
+  let body;
+  try {
+    body = await readRawBody(req, MAX_UPLOAD_BYTES);
+  } catch (error) {
+    return sendError(res, error.statusCode || 400, "bad_request", error.message);
+  }
+  if (!body.length) {
+    return sendError(res, 400, "bad_request", "Empty audio payload.");
+  }
+
+  const ext = matchedMime.includes("wav")
+    ? "wav"
+    : matchedMime.includes("ogg")
+      ? "ogg"
+      : "mp3";
+  const canonicalMime = ext === "wav" ? "audio/wav" : ext === "ogg" ? "audio/ogg" : "audio/mpeg";
+  const audioSeconds = Number(req.headers["x-audio-seconds"] || 0) || null;
+
+  const stored = await putPrivateObject(body, ext);
+  attachChapterAudio({
+    documentId,
+    chapterId,
+    audioKey: stored.key,
+    audioMime: canonicalMime,
+    audioSeconds,
+  });
+
+  audit({
+    event: "chapter.audio.upload",
+    outcome: "allow",
+    actorId: admin.id,
+    actorRole: "admin",
+    documentId,
+    ip: extractIp(req),
+    userAgent: userAgent(req),
+    detail: { chapterId, byteSize: stored.byteSize, mime: canonicalMime },
+  });
+
+  return sendJson(res, 201, {
+    ok: true,
+    chapterId,
+    byteSize: stored.byteSize,
+    audioMime: canonicalMime,
+  });
 }
 
 /* ------------------------------------------------------------------ */
-/* Protected page rendering - the enforcement boundary                 */
+/* Protected page rendering - the primary enforcement boundary         */
 /* ------------------------------------------------------------------ */
 
 async function handlePage(req, res, documentId) {
@@ -491,7 +852,16 @@ async function handlePage(req, res, documentId) {
 
   const user = currentUser(req);
   if (!user) {
-    audit({ event: "page.render", outcome: "deny", actorId: null, actorRole: null, documentId, ip: extractIp(req), userAgent: userAgent(req), detail: { reason: "unauthenticated" } });
+    audit({
+      event: "page.render",
+      outcome: "deny",
+      actorId: null,
+      actorRole: null,
+      documentId,
+      ip: extractIp(req),
+      userAgent: userAgent(req),
+      detail: { reason: "unauthenticated" },
+    });
     return sendError(res, 401, "not_authenticated", "No valid session.");
   }
 
@@ -511,48 +881,107 @@ async function handlePage(req, res, documentId) {
   }
 
   const document = findDocument(documentId);
-  if (!document) {
+  if (!document || document.archived_at) {
     return sendError(res, 404, "not_found", "Document not found.");
   }
 
-  const page = Number(req.headers["x-page"] || parseQuery(req.url).page || 1);
-  if (!Number.isFinite(page) || page < 1 || page > document.page_count) {
-    return sendError(res, 400, "bad_page", `Page must be between 1 and ${document.page_count}.`);
+  const query = parseQuery(req.url);
+  const rawPage = req.headers["x-page"] ?? query.page ?? 1;
+  const page = Number(rawPage);
+  if (!Number.isInteger(page) || page < 1 || page > document.page_count) {
+    return sendError(
+      res,
+      400,
+      "bad_page",
+      `Page must be an integer between 1 and ${document.page_count}.`,
+    );
   }
 
-  // Issue/verify a short-lived page token bound to entitlement version.
-  // A fresh token is issued per page load so revocation invalidates it fast.
   const entitlement = verdict.entitlement;
-  const token = issuePageToken(user, documentId, page, entitlement.version);
-  const tokenExpiresAt = new Date(Date.now() + PAGE_TOKEN_TTL_SECONDS * 1000).toISOString();
 
-  try {
-    const storagePath = readPrivateObjectSync(document.storage_key);
-  } catch {
+  // If a signed page token is supplied, verify signature, purpose, expiry,
+  // subject identity, document, page AND current entitlement version.
+  if (query.token !== undefined) {
+    try {
+      const claims = verifyPageToken(query.token);
+      if (
+        claims.sub !== user.id ||
+        claims.doc !== documentId ||
+        Number(claims.page) !== page ||
+        Number(claims.ent) !== Number(entitlement.version)
+      ) {
+        audit({
+          event: "page.render",
+          outcome: "deny",
+          actorId: user.id,
+          actorRole: user.role,
+          documentId,
+          page,
+          ip: extractIp(req),
+          userAgent: userAgent(req),
+          detail: { reason: "page_token_claim_mismatch" },
+        });
+        return sendError(res, 403, "invalid_page_token", "Page token does not match current session or entitlement.");
+      }
+    } catch (error) {
+      audit({
+        event: "page.render",
+        outcome: "deny",
+        actorId: user.id,
+        actorRole: user.role,
+        documentId,
+        page,
+        ip: extractIp(req),
+        userAgent: userAgent(req),
+        detail: { reason: error.code || "invalid_page_token" },
+      });
+      return sendError(res, 403, "invalid_page_token", error.message);
+    }
+  }
+
+  const limiter = rateLimit(`page:${user.id}`, 180, 60);
+  if (!limiter.allowed) {
+    res.setHeader("Retry-After", String(limiter.retryAfter || 60));
+    return sendError(res, 429, "rate_limited", "Too many page requests.");
+  }
+
+  if (!privateObjectExists(document.storage_key)) {
     return sendError(res, 404, "not_found", "Stored document is unavailable.");
   }
+  const absolutePdfPath = keyToPath(document.storage_key);
 
-  // Staging: engine reads from disk; copy the private object to a temp file.
-  const fs = require("node:fs");
-  const crypto = require("node:crypto");
-  const tmpDir = require("node:path").join(require("os").tmpdir(), "cv-render");
-  fs.mkdirSync(tmpDir, { recursive: true });
-  const staged = path.join(tmpDir, `${crypto.randomBytes(12).toString("hex")}.pdf`);
-  fs.writeFileSync(staged, storagePath);
+  const token = issuePageToken(user, documentId, page, entitlement.version);
+  const tokenExpiresAt = new Date(
+    Date.now() + PAGE_TOKEN_TTL_SECONDS * 1000,
+  ).toISOString();
+
+  const chapter = findChapterForPage(documentId, page);
+  const audioToken =
+    chapter && chapter.audio_key
+      ? issueAudioToken(user, documentId, page, entitlement.version)
+      : null;
 
   try {
+    // Identity ALWAYS comes from the server-side authenticated user row.
+    // Client-supplied headers/query fields (userId, watermark, etc.) are ignored.
+    const stamp = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
     const result = await renderWatermarkedPage({
-      absolutePath: staged,
+      absolutePath: absolutePdfPath,
       page,
+      contentHash: document.content_hash,
       identity: {
         label: user.display_name,
         ref: user.id,
-        stamp: new Date().toISOString(),
+        stamp,
       },
     });
 
-    // Record reading progress server-side (never accepted from the client).
-    recordProgress({ userId: user.id, documentId, page, pageCount: document.page_count });
+    recordProgress({
+      userId: user.id,
+      documentId,
+      page,
+      pageCount: document.page_count,
+    });
 
     audit({
       event: "page.render",
@@ -563,29 +992,47 @@ async function handlePage(req, res, documentId) {
       page,
       ip: extractIp(req),
       userAgent: userAgent(req),
-      detail: { sha256: result.sha256, renderMs: result.renderMs },
+      detail: {
+        sha256: result.sha256,
+        renderMs: result.renderMs,
+        cacheHit: result.cacheHit,
+      },
     });
 
-    return sendBuffer(res, 200, result.buffer, "image/png", {
+    const extraHeaders = {
       ...protectedAssetHeaders(),
+      "X-Page-Number": String(page),
+      "X-Page-Count": String(document.page_count),
       "X-Page-Token": token,
       "X-Page-Token-Expires": tokenExpiresAt,
       "X-Content-Watermark": "STRATA per-student burned-in mark",
-    });
-  } catch (error) {
-    audit({ event: "page.render", outcome: "error", actorId: user.id, actorRole: user.role, documentId, page, ip: extractIp(req), userAgent: userAgent(req), detail: { error: error.message } });
-    return sendError(res, 500, "render_error", error.message);
-  } finally {
-    try {
-      fs.unlinkSync(staged);
-    } catch {
-      /* staged file cleanup failure is non-fatal */
+    };
+    if (audioToken) {
+      extraHeaders["X-Audio-Token"] = audioToken;
+      extraHeaders["X-Audio-Token-Expires"] = new Date(
+        Date.now() + AUDIO_TOKEN_TTL_SECONDS * 1000,
+      ).toISOString();
     }
+
+    return sendBuffer(res, 200, result.buffer, "image/png", extraHeaders);
+  } catch (error) {
+    audit({
+      event: "page.render",
+      outcome: "error",
+      actorId: user.id,
+      actorRole: user.role,
+      documentId,
+      page,
+      ip: extractIp(req),
+      userAgent: userAgent(req),
+      detail: { error: error.message },
+    });
+    return sendError(res, 500, "render_error", error.message);
   }
 }
 
 /* ------------------------------------------------------------------ */
-/* Audio playback                                                      */
+/* Protected audio playback (with HTTP Range support)                  */
 /* ------------------------------------------------------------------ */
 
 async function handleAudio(req, res, documentId) {
@@ -595,88 +1042,309 @@ async function handleAudio(req, res, documentId) {
 
   const user = currentUser(req);
   if (!user) {
-    audit({ event: "audio.play", outcome: "deny", actorId: null, actorRole: null, documentId, ip: extractIp(req), userAgent: userAgent(req), detail: { reason: "unauthenticated" } });
+    audit({
+      event: "audio.play",
+      outcome: "deny",
+      actorId: null,
+      actorRole: null,
+      documentId,
+      ip: extractIp(req),
+      userAgent: userAgent(req),
+      detail: { reason: "unauthenticated" },
+    });
     return sendError(res, 401, "not_authenticated", "No valid session.");
   }
 
   const verdict = canReadDocument(user, documentId);
   if (!verdict.allowed) {
-    audit({ event: "audio.play", outcome: "deny", actorId: user.id, actorRole: user.role, documentId, ip: extractIp(req), userAgent: userAgent(req), detail: { reason: verdict.reason } });
+    audit({
+      event: "audio.play",
+      outcome: "deny",
+      actorId: user.id,
+      actorRole: user.role,
+      documentId,
+      ip: extractIp(req),
+      userAgent: userAgent(req),
+      detail: { reason: verdict.reason },
+    });
     return sendError(res, 403, verdict.reason, `Access denied: ${verdict.reason}.`);
   }
 
-  const page = Number(req.headers["x-page"] || 1);
-  const chapter = findChapterForPage(documentId, page);
-  if (!chapter || !chapter.audio_key) {
-    return sendError(res, 404, "no_audio", "No audio track for this page.");
+  const query = parseQuery(req.url);
+  if (query.token !== undefined) {
+    try {
+      const claims = verifyAudioToken(query.token);
+      if (
+        claims.sub !== user.id ||
+        claims.doc !== documentId ||
+        Number(claims.ent) !== Number(verdict.entitlement.version)
+      ) {
+        audit({
+          event: "audio.play",
+          outcome: "deny",
+          actorId: user.id,
+          actorRole: user.role,
+          documentId,
+          ip: extractIp(req),
+          userAgent: userAgent(req),
+          detail: { reason: "audio_token_claim_mismatch" },
+        });
+        return sendError(res, 403, "invalid_audio_token", "Audio token is not valid for this session.");
+      }
+    } catch (error) {
+      audit({
+        event: "audio.play",
+        outcome: "deny",
+        actorId: user.id,
+        actorRole: user.role,
+        documentId,
+        ip: extractIp(req),
+        userAgent: userAgent(req),
+        detail: { reason: error.code || "invalid_audio_token" },
+      });
+      return sendError(res, 403, "invalid_audio_token", error.message);
+    }
   }
 
+  const page = Number(req.headers["x-page"] ?? query.page ?? 1);
+  const chapter = query.chapter
+    ? findChapterById(documentId, String(query.chapter))
+    : findChapterForPage(documentId, Number.isFinite(page) && page >= 1 ? page : 1);
+
+  if (!chapter || !chapter.audio_key) {
+    return sendError(res, 404, "no_audio", "No audio track is attached to this section.");
+  }
+
+  let audioBuffer;
   try {
-    const stream = readPrivateObjectSync(chapter.audio_key);
-    return sendBuffer(res, 200, stream, chapter.audio_mime || "audio/mpeg", {
-      ...protectedAssetHeaders(),
-      "Accept-Ranges": "bytes",
-    });
+    audioBuffer = readPrivateObjectSync(chapter.audio_key);
   } catch {
     return sendError(res, 404, "not_found", "Audio object unavailable.");
   }
+
+  const total = audioBuffer.length;
+  const mime = chapter.audio_mime || "audio/wav";
+  const rangeHeader = req.headers.range;
+
+  // Record audit entry on initial audio fetch or byte=0 start to avoid spamming every scrub chunk.
+  const isInitialOrStart = !rangeHeader || /^bytes=0-/i.test(String(rangeHeader));
+  if (isInitialOrStart) {
+    audit({
+      event: "audio.play",
+      outcome: "allow",
+      actorId: user.id,
+      actorRole: user.role,
+      documentId,
+      page: Number.isFinite(page) ? page : chapter.start_page,
+      ip: extractIp(req),
+      userAgent: userAgent(req),
+      detail: { chapterId: chapter.id, ordinal: chapter.ordinal },
+    });
+  }
+
+  if (typeof rangeHeader === "string" && rangeHeader.startsWith("bytes=")) {
+    const match = rangeHeader.replace(/bytes=/, "").split("-");
+    const start = Number.parseInt(match[0], 10);
+    const end = match[1] ? Number.parseInt(match[1], 10) : total - 1;
+    if (
+      !Number.isInteger(start) ||
+      !Number.isInteger(end) ||
+      start < 0 ||
+      end >= total ||
+      start > end
+    ) {
+      res.writeHead(416, {
+        "Content-Range": `bytes */${total}`,
+        ...protectedAssetHeaders(),
+      });
+      res.end();
+      return;
+    }
+    const slice = audioBuffer.subarray(start, end + 1);
+    return sendBuffer(res, 206, slice, mime, {
+      ...protectedAssetHeaders(),
+      "Accept-Ranges": "bytes",
+      "Content-Range": `bytes ${start}-${end}/${total}`,
+    });
+  }
+
+  return sendBuffer(res, 200, audioBuffer, mime, {
+    ...protectedAssetHeaders(),
+    "Accept-Ranges": "bytes",
+  });
 }
 
 /* ------------------------------------------------------------------ */
-/* Admin diagnostics                                                   */
+/* Reading progress                                                    */
+/* ------------------------------------------------------------------ */
+
+async function handleProgress(req, res, documentId) {
+  const user = currentUser(req);
+  if (!user) {
+    return sendError(res, 401, "not_authenticated", "No valid session.");
+  }
+  const verdict = canReadDocument(user, documentId);
+  if (!verdict.allowed) {
+    return sendError(res, 403, verdict.reason, `Access denied: ${verdict.reason}.`);
+  }
+  const document = findDocument(documentId);
+  if (!document) {
+    return sendError(res, 404, "not_found", "Document not found.");
+  }
+
+  if (req.method === "GET") {
+    return sendJson(res, 200, {
+      ok: true,
+      progress: getProgress(user.id, documentId) || {
+        last_page: 1,
+        pages_read: 0,
+        updated_at: null,
+      },
+    });
+  }
+
+  if (req.method === "POST") {
+    let body;
+    try {
+      body = await readJson(req);
+    } catch (error) {
+      return sendError(res, error.statusCode || 400, "bad_request", error.message);
+    }
+    const page = Number(body.page || 1);
+    if (!Number.isInteger(page) || page < 1 || page > document.page_count) {
+      return sendError(
+        res,
+        400,
+        "bad_page",
+        `Page must be between 1 and ${document.page_count}.`,
+      );
+    }
+    recordProgress({
+      userId: user.id,
+      documentId,
+      page,
+      pageCount: document.page_count,
+    });
+    return sendJson(res, 200, {
+      ok: true,
+      progress: getProgress(user.id, documentId),
+    });
+  }
+
+  return methodNotAllowed(res, "GET, POST");
+}
+
+/* ------------------------------------------------------------------ */
+/* Admin diagnostics, users, audit log & engine selftest               */
 /* ------------------------------------------------------------------ */
 
 async function handleAdminStats(req, res) {
-  const admin = requireAdmin(req);
-  if (!admin) {
-    return sendError(res, 403, "admin_required", "Only administrators may view statistics.");
-  }
+  if (req.method !== "GET") return methodNotAllowed(res, "GET");
+  const admin = ensureAdmin(req, res, "admin.stats");
+  if (!admin) return;
+
+  const db = getDb();
+  const activeEntitlements =
+    db
+      .prepare("SELECT COUNT(*) AS n FROM entitlements WHERE status = 'active'")
+      .get()?.n ?? 0;
+  const auditAllows =
+    db
+      .prepare("SELECT COUNT(*) AS n FROM audit_log WHERE outcome = 'allow'")
+      .get()?.n ?? 0;
+  const auditDenies =
+    db
+      .prepare("SELECT COUNT(*) AS n FROM audit_log WHERE outcome = 'deny'")
+      .get()?.n ?? 0;
+
   return sendJson(res, 200, {
     ok: true,
     users: listUsers().length,
     documents: listDocuments().length,
+    activeEntitlements,
+    auditAllows,
+    auditDenies,
     timestamp: nowIso(),
   });
 }
 
+async function handleAdminUsers(req, res) {
+  if (req.method !== "GET") return methodNotAllowed(res, "GET");
+  const admin = ensureAdmin(req, res, "admin.users.list");
+  if (!admin) return;
+
+  return sendJson(res, 200, {
+    ok: true,
+    users: listUsers(),
+  });
+}
+
+async function handleAdminAudit(req, res) {
+  if (req.method !== "GET") return methodNotAllowed(res, "GET");
+  const admin = ensureAdmin(req, res, "admin.audit.list");
+  if (!admin) return;
+
+  const query = parseQuery(req.url);
+  const entries = listAudit({
+    limit: query.limit ? Number(query.limit) : 100,
+    documentId: query.documentId || null,
+    event: query.event || null,
+    outcome: query.outcome || null,
+  });
+
+  return sendJson(res, 200, {
+    ok: true,
+    entries,
+  });
+}
+
 async function handleEngineSelftest(req, res) {
-  const admin = requireAdmin(req);
-  if (!admin) {
-    return sendError(res, 403, "admin_required", "Admin only.");
-  }
-  const demoDocId = requireDemoDocId();
-  if (!demoDocId) {
-    return sendError(res, 404, "not_found", "No demo document seeded yet.");
-  }
-  const doc = findDocument(demoDocId);
-  if (!doc) return sendError(res, 404, "not_found", "Demo document not found.");
+  if (req.method !== "GET") return methodNotAllowed(res, "GET");
+  const admin = ensureAdmin(req, res, "admin.engine.selftest");
+  if (!admin) return;
 
-  const fs = require("node:fs");
-  const crypto = require("node:crypto");
-  const tmpDir = require("node:path").join(require("os").tmpdir(), "cv-selftest");
-  fs.mkdirSync(tmpDir, { recursive: true });
-  const staged = path.join(tmpDir, `${crypto.randomBytes(12).toString("hex")}.pdf`);
-  fs.writeFileSync(staged, readPrivateObjectSync(doc.storage_key));
+  const targetId = requireDemoDocId();
+  if (!targetId) {
+    return sendError(res, 404, "not_found", "No document available for self-test.");
+  }
+  const doc = findDocument(targetId);
+  if (!doc || !privateObjectExists(doc.storage_key)) {
+    return sendError(res, 404, "not_found", "Document storage object not found.");
+  }
 
-  try {
-    const report = await engineSelftest(staged, 2, 96);
-    return sendJson(res, 200, {
-      ok: true,
-      watermarkIdentityBound: report.watermarkedOutputsDiffer,
+  const testPage = Math.min(2, Math.max(1, doc.page_count));
+  const report = await engineSelftest(keyToPath(doc.storage_key), testPage, 96);
+
+  audit({
+    event: "admin.engine.selftest",
+    outcome: "info",
+    actorId: admin.id,
+    actorRole: "admin",
+    documentId: doc.id,
+    page: testPage,
+    ip: extractIp(req),
+    userAgent: userAgent(req),
+    detail: {
+      watermarkedOutputsDiffer: report.watermarkedOutputsDiffer,
       watermarkChangesPixels: report.watermarkChangesPixels,
       shaA: report.shaA,
       shaB: report.shaB,
-      watermarkA: report.watermarkA,
-      watermarkB: report.watermarkB,
-      renderMs: report.renderMsA,
-    });
-  } finally {
-    try {
-      fs.unlinkSync(staged);
-    } catch {
-      /* ignore */
-    }
-  }
+    },
+  });
+
+  return sendJson(res, 200, {
+    ok: true,
+    documentId: doc.id,
+    page: testPage,
+    watermarkIdentityBound: report.watermarkedOutputsDiffer,
+    watermarkChangesPixels: report.watermarkChangesPixels,
+    shaA: report.shaA,
+    shaB: report.shaB,
+    shaClean: report.shaClean,
+    watermarkA: report.watermarkA,
+    watermarkB: report.watermarkB,
+    renderMs: report.renderMsA,
+  });
 }
 
 export {
@@ -686,9 +1354,12 @@ export {
   handleGrantAccess,
   handleRevokeAccess,
   handleChapters,
+  handleUploadChapterAudio,
   handlePage,
   handleAudio,
+  handleProgress,
   handleAdminStats,
+  handleAdminUsers,
+  handleAdminAudit,
   handleEngineSelftest,
 };
-

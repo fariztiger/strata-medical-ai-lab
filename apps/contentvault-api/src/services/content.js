@@ -91,9 +91,14 @@ export function listReadableDocuments(user) {
       `SELECT d.id, d.title_en, d.title_zh, d.author, d.description,
               d.page_count, d.synthetic, d.created_at, d.byte_size,
               e.id AS entitlement_id, e.status AS entitlement_status,
-              e.expires_at, e.version
+              e.expires_at, e.version,
+              COALESCE(rp.last_page, 1) AS last_page,
+              COALESCE(rp.pages_read, 0) AS pages_read,
+              rp.updated_at AS last_read_at
        FROM documents d
        JOIN entitlements e ON e.document_id = d.id
+       LEFT JOIN reading_progress rp
+         ON rp.document_id = d.id AND rp.user_id = e.user_id
        WHERE e.user_id = ? AND d.archived_at IS NULL
        ORDER BY d.created_at DESC`,
     )
@@ -170,6 +175,32 @@ export function findChapterForPage(documentId, page) {
       )
       .get(documentId, page, page) ?? null
   );
+}
+
+export function findChapterById(documentId, chapterId) {
+  if (!documentId || !chapterId) return null;
+  return (
+    getDb()
+      .prepare("SELECT * FROM chapters WHERE document_id = ? AND id = ?")
+      .get(documentId, chapterId) ?? null
+  );
+}
+
+export function attachChapterAudio({
+  documentId,
+  chapterId,
+  audioKey,
+  audioMime = "audio/wav",
+  audioSeconds = null,
+}) {
+  const result = getDb()
+    .prepare(
+      `UPDATE chapters
+       SET audio_key = ?, audio_mime = ?, audio_seconds = COALESCE(?, audio_seconds)
+       WHERE id = ? AND document_id = ?`,
+    )
+    .run(audioKey, audioMime, audioSeconds, chapterId, documentId);
+  return result.changes > 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -315,17 +346,21 @@ export function listEntitlementsForDocument(documentId) {
 /* ------------------------------------------------------------------ */
 
 export function recordProgress({ userId, documentId, page, pageCount }) {
-  const safePage = Math.min(Math.max(Number(page) || 1, 1), Math.max(pageCount, 1));
+  const cap = Math.max(Number(pageCount) || 1, 1);
+  const safePage = Math.min(Math.max(Number(page) || 1, 1), cap);
   getDb()
     .prepare(
       `INSERT INTO reading_progress (user_id, document_id, last_page, pages_read, updated_at)
        VALUES (?, ?, ?, 1, ?)
        ON CONFLICT(user_id, document_id) DO UPDATE SET
+         pages_read = CASE
+           WHEN reading_progress.last_page = excluded.last_page THEN reading_progress.pages_read
+           ELSE MIN(?, reading_progress.pages_read + 1)
+         END,
          last_page = excluded.last_page,
-         pages_read = pages_read + 1,
          updated_at = excluded.updated_at`,
     )
-    .run(userId, documentId, safePage, nowIso());
+    .run(userId, documentId, safePage, nowIso(), cap);
 }
 
 export function getProgress(userId, documentId) {

@@ -20,6 +20,8 @@ function resolvePython() {
   if (configured && fs.existsSync(configured)) return configured;
 
   const candidates = [
+    path.join(REPO_ROOT, ".venv", "bin", "python"),
+    path.join(REPO_ROOT, ".venv", "Scripts", "python.exe"),
     path.join(
       process.env.USERPROFILE || "",
       ".dsh",
@@ -29,8 +31,8 @@ function resolvePython() {
       "python",
       "python.exe",
     ),
-    "python",
     "python3",
+    "python",
     "py",
   ];
   for (const candidate of candidates) {
@@ -39,7 +41,7 @@ function resolvePython() {
     }
     if (candidate && fs.existsSync(candidate)) return candidate;
   }
-  return "python";
+  return "python3";
 }
 
 const PYTHON = resolvePython();
@@ -161,6 +163,7 @@ export async function renderWatermarkedPage({
   page,
   identity,
   dpi = RENDER_DPI,
+  contentHash = null,
 }) {
   const result = await runEngine({
     command: "render",
@@ -168,6 +171,8 @@ export async function renderWatermarkedPage({
     page,
     dpi,
     identity,
+    cacheDir: CACHE_DIR,
+    contentHash,
   });
   return {
     buffer: Buffer.from(result.png, "base64"),
@@ -177,6 +182,7 @@ export async function renderWatermarkedPage({
     pageCount: result.pageCount,
     watermark: result.watermark,
     renderMs: result.renderMs,
+    cacheHit: Boolean(result.cacheHit),
   };
 }
 

@@ -7,7 +7,7 @@
  * query string or custom header for authorisation purposes.
  */
 
-import { getDb, nowIso } from "./db.js";
+import { getDb, nowIso } from "../db.js";
 import {
   hashPassword,
   newId,
@@ -17,7 +17,11 @@ import {
   signToken,
   verifyToken,
 } from "./crypto.js";
-import { SESSION_IDLE_MINUTES, PAGE_TOKEN_TTL_SECONDS } from "\.\./config.js";
+import {
+  SESSION_IDLE_MINUTES,
+  PAGE_TOKEN_TTL_SECONDS,
+  AUDIO_TOKEN_TTL_SECONDS,
+} from "../config.js";
 import { audit } from "./audit.js";
 
 export const SESSION_COOKIE = "cv_session";
@@ -288,6 +292,27 @@ export function issuePageToken(user, documentId, page, entitlementVersion) {
 
 export function verifyPageToken(token) {
   return verifyToken(token, "page");
+}
+
+/**
+ * Issue a short-lived signed audio token bound to user, document, page/chapter,
+ * and entitlement version.
+ */
+export function issueAudioToken(user, documentId, page, entitlementVersion) {
+  return signToken(
+    {
+      sub: user.id,
+      doc: documentId,
+      page: Number(page),
+      ent: Number(entitlementVersion),
+    },
+    AUDIO_TOKEN_TTL_SECONDS,
+    "audio",
+  );
+}
+
+export function verifyAudioToken(token) {
+  return verifyToken(token, "audio");
 }
 
 export { TokenError };

@@ -74,7 +74,6 @@ const BASE_CSP = [
   "default-src 'self'",
   "base-uri 'none'",
   "form-action 'self'",
-  "frame-ancestors 'none'",
   "object-src 'none'",
 ];
 
@@ -84,23 +83,29 @@ const BASE_CSP = [
  * attributes; inline scripts are not.
  */
 export function htmlSecurityHeaders() {
-  return {
+  const allowEmbed = process.env.CV_ALLOW_FRAME_EMBED === "1";
+  const frameAncestors = allowEmbed ? "frame-ancestors *" : "frame-ancestors 'none'";
+  const headers = {
     "Content-Security-Policy": [
       ...BASE_CSP,
+      frameAncestors,
       "script-src 'self'",
       "style-src 'self' 'unsafe-inline'",
       "img-src 'self' blob: data:",
-      "media-src 'self'",
+      "media-src 'self' blob:",
       "connect-src 'self'",
-      "font-src 'self'",
+      "font-src 'self' data:",
     ].join("; "),
     "X-Content-Type-Options": "nosniff",
-    "X-Frame-Options": "DENY",
     "Referrer-Policy": "no-referrer",
-    "Cross-Origin-Opener-Policy": "same-origin",
-    "Cross-Origin-Resource-Policy": "same-origin",
+    "Cross-Origin-Resource-Policy": allowEmbed ? "cross-origin" : "same-origin",
     "Permissions-Policy": "geolocation=(), microphone=(), camera=(), payment=()",
   };
+  if (!allowEmbed) {
+    headers["X-Frame-Options"] = "DENY";
+    headers["Cross-Origin-Opener-Policy"] = "same-origin";
+  }
+  return headers;
 }
 
 /**
@@ -192,6 +197,7 @@ export function serializeCookie(name, value, options = {}) {
   if (options.httpOnly !== false) parts.push("HttpOnly");
   parts.push(`SameSite=${options.sameSite || "Strict"}`);
   if (options.secure) parts.push("Secure");
+  if (options.partitioned) parts.push("Partitioned");
   return parts.join("; ");
 }
 
@@ -248,8 +254,11 @@ export function isSameOriginMutating(req) {
   if (!origin) return true; // non-browser clients (tests) authenticate via cookie anyway
   try {
     const parsed = new URL(origin);
-    const host = String(req.headers.host || "");
-    return parsed.host === host;
+    const forwardedHost = String(req.headers["x-forwarded-host"] || "")
+      .split(",")[0]
+      .trim();
+    const directHost = String(req.headers.host || "").trim();
+    return parsed.host === directHost || (Boolean(forwardedHost) && parsed.host === forwardedHost);
   } catch {
     return false;
   }

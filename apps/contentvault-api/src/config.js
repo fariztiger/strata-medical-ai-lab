@@ -36,6 +36,8 @@ export const DATA_DIR = process.env.CV_DATA_DIR
 export const STORAGE_DIR = path.join(DATA_DIR, "storage", "private");
 export const CACHE_DIR = path.join(DATA_DIR, "render-cache");
 export const DB_PATH = path.join(DATA_DIR, "contentvault.db");
+export const SEED_MANIFEST_PATH = path.join(DATA_DIR, "seed-manifest.json");
+export const PUBLIC_DIR = path.join(API_ROOT, "public");
 
 export const PORT = Number(process.env.PORT || 7410);
 export const HOST = process.env.HOST || "127.0.0.1";
