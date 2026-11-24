@@ -448,6 +448,13 @@ try {
   const reportPath = path.join(SCREENSHOT_DIR, "browser-verification-report.json");
   fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
   console.log("BROWSER_VERIFICATION_PASSED:", JSON.stringify(report, null, 2));
+} catch (err) {
+  report.error = { message: err.message, stack: err.stack };
+  fs.writeFileSync(
+    path.join(SCREENSHOT_DIR, "browser-verification-report.json"),
+    JSON.stringify(report, null, 2),
+  );
+  throw err;
 } finally {
   if (browser) await browser.close();
   server.kill("SIGTERM");

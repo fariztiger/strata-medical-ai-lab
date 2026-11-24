@@ -624,7 +624,7 @@ body {
 
 .docs-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr));
   gap: 20px;
   margin-bottom: 28px;
 }
@@ -1183,21 +1183,21 @@ table.data-table th {
 
 @media (max-width: 960px) {
   .auth-layout {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     gap: 24px;
     padding-top: 24px;
   }
   .security-pillars {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
   .stats-strip {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .admin-split {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
   .reader-workspace {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
   .reader-mobile-bar {
     display: flex;
@@ -1208,6 +1208,8 @@ table.data-table th {
   }
   .reader-sidebar {
     display: none;
+    width: 100%;
+    max-width: 100%;
     border-right: none;
     border-bottom: 2px solid var(--gold);
   }
@@ -1222,12 +1224,16 @@ table.data-table th {
   }
   .persona-grid,
   .form-row-2 {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
   .stats-strip {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .reader-viewport {
     padding: 12px;
+  }
+  .watermark-indicator,
+  .mono-xs {
+    overflow-wrap: anywhere;
   }
 }

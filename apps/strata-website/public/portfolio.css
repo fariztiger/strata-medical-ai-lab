@@ -318,13 +318,13 @@ body.highlight-placeholders [data-placeholder-item="true"] {
 
 .cards-grid-3 {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 290px), 1fr));
   gap: 18px;
 }
 
 .cards-grid-2 {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 400px), 1fr));
   gap: 18px;
 }
 
@@ -577,11 +577,19 @@ body.highlight-placeholders [data-placeholder-item="true"] {
   .pf-hero-grid,
   .two-col,
   .cards-grid-2,
+  .cards-grid-3,
   .enq-row {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
   .tl-row {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     gap: 6px;
+  }
+  .pf-container {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+  body {
+    overflow-wrap: break-word;
   }
 }

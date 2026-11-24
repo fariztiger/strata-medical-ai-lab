@@ -635,7 +635,8 @@
     const fig = $("reader-figure");
     if (!fig) return;
     const basePx = 790;
-    fig.style.width = `${Math.round((basePx * zoomPercent) / 100)}px`;
+    const targetPx = Math.round((basePx * zoomPercent) / 100);
+    fig.style.width = zoomPercent <= 100 ? `min(100%, ${targetPx}px)` : `${targetPx}px`;
     $("btn-zoom-reset").textContent = `${zoomPercent}%`;
   }
 
