@@ -1,7 +1,8 @@
-﻿
+
 # STRATA - Dependencies
 node_modules/
 vendor/pylibs/
+vendor/fonts/
 .venv/
 venv/
 __pycache__/
@@ -12,6 +13,8 @@ __pycache__/
 dist/
 build/
 .pytest_cache/
+playwright-report/
+test-results/
 
 # Runtime and private storage
 var/

@@ -1,0 +1,11 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+var/
+vendor/pylibs/
+vendor/fonts/
+**/node_modules/
+reports/
+*.log

@@ -1,0 +1,74 @@
+# ============================================================================
+# STRATA ContentVault — Self-Hosted PostgreSQL 16 + Least-Privilege Compose
+# ============================================================================
+# Demonstrates strict separation between migration owner (`strata_owner`) and
+# restricted runtime login (`cv_runtime`), secret-file mounting (`0400`), and
+# `/readyz` health gating. Requires local secrets created before `docker compose up`:
+#   mkdir -p ./secrets && chmod 0700 ./secrets
+#   openssl rand -hex 48 > ./secrets/cv_signing_secret && chmod 0600 ./secrets/cv_signing_secret
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: contentvault
+      POSTGRES_USER: strata_owner
+      POSTGRES_PASSWORD: ${PG_OWNER_PASSWORD:?Set PG_OWNER_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U strata_owner -d contentvault"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_MIGRATION_URL: postgres://strata_owner:${PG_OWNER_PASSWORD}@postgres:5432/contentvault
+      CV_PG_RUNTIME_PASSWORD: ${PG_RUNTIME_PASSWORD:?Set PG_RUNTIME_PASSWORD}
+      CV_PG_SSL_MODE: ${CV_PG_SSL_MODE:-disable}
+    command: ["node", "apps/contentvault-api/scripts/migrate-pg.js", "up"]
+    restart: "no"
+
+  contentvault-api:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:7410:7410"
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 7410
+      CV_DB_BACKEND: postgres
+      CV_REQUIRE_POSTGRES: "1"
+      CV_ENFORCE_DB_ROLE_SEPARATION: "1"
+      DATABASE_URL: postgres://cv_runtime:${PG_RUNTIME_PASSWORD}@postgres:5432/contentvault
+      CV_PG_SSL_MODE: ${CV_PG_SSL_MODE:-disable}
+      CV_SIGNING_SECRET_FILE: /run/secrets/cv_signing_secret
+      CV_DATA_DIR: /var/lib/contentvault
+      CV_PDF_ENGINE: pypdfium2
+      CV_WORKER_MAX_CONCURRENCY: "4"
+      CV_WORKER_MAX_QUEUE: "24"
+      CV_WORKER_MAX_PER_USER: "2"
+    secrets:
+      - cv_signing_secret
+    volumes:
+      - cv_private_data:/var/lib/contentvault
+    restart: unless-stopped
+
+secrets:
+  cv_signing_secret:
+    file: ./secrets/cv_signing_secret
+
+volumes:
+  pgdata:
+  cv_private_data:

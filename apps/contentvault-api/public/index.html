@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>STRATA ContentVault · Protected Digital Learning Engine</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <a href="#main-content" class="skip-link" data-i18n="skipToContent">Skip to main content</a>
+
+  <!-- Top Synthetic Notice Banner -->
+  <div class="synthetic-banner" role="region" aria-label="Demonstration status">
+    <div class="container synthetic-banner-inner">
+      <span class="synthetic-pill" data-i18n="syntheticBadge">SYNTHETIC RESEARCH PROTOTYPE</span>
+      <span class="synthetic-text" data-i18n="syntheticNotice">
+        STRATA ContentVault v0.1 — Uses synthetic demonstration content only. Server-side rasterisation &amp; per-learner watermarking active.
+      </span>
+    </div>
+  </div>
+
+  <!-- Main Header -->
+  <header class="site-header">
+    <div class="container header-inner">
+      <div class="brand-group">
+        <div class="brand-emblem" aria-hidden="true">S</div>
+        <div>
+          <div class="brand-title">STRATA <span class="brand-accent">ContentVault</span></div>
+          <div class="brand-subtitle" data-i18n="brandSubtitle">Medical AI Research Lab · Protected Education Engine</div>
+        </div>
+      </div>
+
+      <div class="header-actions">
+        <a id="header-portfolio-link" href="/portfolio" class="btn btn-outline-light btn-sm hidden" data-i18n="portfolioNav">M007 Portfolio</a>
+        <div class="locale-switch" role="group" aria-label="Language switch">
+          <button type="button" id="btn-locale-en" class="locale-btn active" aria-pressed="true">EN</button>
+          <button type="button" id="btn-locale-zh" class="locale-btn" aria-pressed="false">中文</button>
+        </div>
+
+        <div id="header-session-box" class="session-box hidden">
+          <div class="user-chip">
+            <span id="header-user-role" class="role-badge">STUDENT</span>
+            <span id="header-user-name" class="user-name"></span>
+          </div>
+          <button type="button" id="btn-logout" class="btn btn-outline-light btn-sm" data-i18n="signOut">Sign Out</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main id="main-content" class="main-shell">
+    <div id="global-toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+    <!-- ============================================================ -->
+    <!-- VIEW 1: AUTHENTICATION                                       -->
+    <!-- ============================================================ -->
+    <section id="view-login" class="container auth-layout" aria-labelledby="login-heading">
+      <div class="auth-hero">
+        <div class="eyebrow" data-i18n="heroEyebrow">INTELLECTUAL PROPERTY DETERRENCE &amp; TRACEABILITY</div>
+        <h1 id="login-heading" class="serif-display" data-i18n="heroTitle">
+          Protected Clinical &amp; Personal Development Learning
+        </h1>
+        <p class="hero-lead" data-i18n="heroLead">
+          Original PDFs remain sealed inside private server storage. Every authorized page request is rasterised server-side at 144 DPI with a personalized, non-removable learner watermark and paired with entitled chapter audio.
+        </p>
+
+        <div class="security-pillars">
+          <div class="pillar-card">
+            <div class="pillar-title" data-i18n="pillar1Title">Zero Raw PDF Exposure</div>
+            <p data-i18n="pillar1Body">Browsers receive single-page PNG rasters with strict no-store cache headers—never the source PDF.</p>
+          </div>
+          <div class="pillar-card">
+            <div class="pillar-title" data-i18n="pillar2Title">Burned-In Identity Mark</div>
+            <p data-i18n="pillar2Body">Learner name, account ID, page, and UTC timestamp are composited directly into pixel data.</p>
+          </div>
+          <div class="pillar-card">
+            <div class="pillar-title" data-i18n="pillar3Title">Instant Revocation &amp; Audit</div>
+            <p data-i18n="pillar3Body">Entitlement version counters immediately invalidate prior tokens and record every allow/deny event.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="auth-panel card">
+        <h2 class="card-title serif-heading" data-i18n="signInHeading">Sign In to ContentVault</h2>
+        <p class="card-subtitle" data-i18n="signInSub">Authenticate with your institutional or learner session.</p>
+
+        <form id="login-form" class="form-stack" novalidate>
+          <div class="field">
+            <label for="login-email" data-i18n="emailLabel">Email Address</label>
+            <input id="login-email" name="email" type="email" autocomplete="username" required placeholder="name@strata.local" />
+          </div>
+
+          <div class="field">
+            <label for="login-password" data-i18n="passwordLabel">Password</label>
+            <input id="login-password" name="password" type="password" autocomplete="current-password" required placeholder="••••••••••••" />
+          </div>
+
+          <div id="login-error" class="alert alert-error hidden" role="alert"></div>
+
+          <button type="submit" id="btn-login-submit" class="btn btn-primary btn-block" data-i18n="signInBtn">
+            Authenticate &amp; Enter Vault
+          </button>
+        </form>
+
+        <div id="demo-personas-section" class="demo-personas hidden">
+          <div class="divider-label">
+            <span data-i18n="demoQuickFill">Synthetic Evaluation Personas (Local Demo)</span>
+          </div>
+          <div id="demo-personas-grid" class="persona-grid"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================ -->
+    <!-- VIEW 2: STUDENT LIBRARY & PROTECTED READER                   -->
+    <!-- ============================================================ -->
+    <section id="view-student" class="hidden" aria-label="Learner workspace">
+      <!-- Subbar -->
+      <div class="subbar">
+        <div class="container subbar-inner">
+          <div class="subbar-tabs" role="tablist">
+            <button type="button" id="tab-student-library" class="subtab active" role="tab" aria-selected="true" data-i18n="myLibraryTab">
+              Assigned Library
+            </button>
+            <button type="button" id="tab-student-reader" class="subtab" role="tab" aria-selected="false" disabled data-i18n="protectedReaderTab">
+              Protected Reader
+            </button>
+          </div>
+          <div class="subbar-meta">
+            <span class="watermark-indicator" id="student-watermark-preview"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Student Library Panel -->
+      <div id="panel-student-library" class="container section-pad">
+        <div class="section-header-row">
+          <div>
+            <h1 class="serif-heading" data-i18n="assignedMaterialsHeading">Assigned Learning Materials</h1>
+            <p class="muted" data-i18n="assignedMaterialsSub">
+              Only modules with an active, non-expired entitlement appear below.
+            </p>
+          </div>
+          <button type="button" id="btn-refresh-library" class="btn btn-secondary btn-sm" data-i18n="refreshBtn">
+            Refresh
+          </button>
+        </div>
+
+        <div id="student-docs-grid" class="docs-grid"></div>
+
+        <!-- Access Control Verification Box (lets reviewers verify CV-004 live!) -->
+        <div class="card verify-access-card">
+          <div class="verify-access-header">
+            <div>
+              <h3 class="card-title-sm" data-i18n="verifyAccessTitle">Access Boundary Verification</h3>
+              <p class="muted-sm" data-i18n="verifyAccessDesc">
+                Attempt to open a document ID directly to verify server-side entitlement enforcement (e.g. when signed in as an unentitled or revoked student).
+              </p>
+            </div>
+          </div>
+          <form id="probe-doc-form" class="inline-probe-form">
+            <label for="probe-doc-id" class="sr-only">Document ID</label>
+            <input id="probe-doc-id" type="text" placeholder="doc_..." />
+            <button type="submit" class="btn btn-secondary btn-sm" data-i18n="testOpenBtn">Request Protected Access</button>
+          </form>
+          <div id="probe-doc-result" class="alert hidden" role="status"></div>
+        </div>
+      </div>
+
+      <!-- Protected Document Reader Panel -->
+      <div id="panel-student-reader" class="reader-workspace hidden">
+        <!-- Mobile Drawer Toggle Bar -->
+        <div class="reader-mobile-bar">
+          <button type="button" id="btn-back-library-mobile" class="btn btn-secondary btn-sm" data-i18n="backToLibrary">
+            ← Library
+          </button>
+          <button type="button" id="btn-toggle-chapters" class="btn btn-secondary btn-sm" aria-expanded="false" aria-controls="reader-sidebar" data-i18n="chaptersAndAudio">
+            Chapters &amp; Audio
+          </button>
+        </div>
+
+        <!-- Reader Sidebar: Chapters + Audio Companion + Progress + Telemetry -->
+        <aside id="reader-sidebar" class="reader-sidebar" aria-label="Chapters and teaching audio">
+          <div class="sidebar-top">
+            <button type="button" id="btn-back-library" class="link-back" data-i18n="backToLibrary">
+              ← Back to Assigned Library
+            </button>
+            <h2 id="reader-doc-title" class="reader-doc-title serif-heading"></h2>
+            <div id="reader-doc-author" class="reader-doc-author"></div>
+          </div>
+
+          <!-- Reading Progress -->
+          <div class="sidebar-block">
+            <div class="progress-label-row">
+              <span data-i18n="readingProgressLabel">Reading Progress</span>
+              <span id="reader-progress-text" class="mono-sm">1 / 1</span>
+            </div>
+            <div class="progress-track" role="progressbar" id="reader-progress-bar-wrap" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <div id="reader-progress-fill" class="progress-fill" style="width: 0%"></div>
+            </div>
+          </div>
+
+          <!-- Authenticated Audio Teaching Player -->
+          <div class="sidebar-block audio-companion-box">
+            <div class="audio-header">
+              <span class="audio-badge" data-i18n="audioCompanionLabel">PROTECTED AUDIO COMPANION</span>
+            </div>
+            <div id="reader-audio-title" class="audio-chapter-title"></div>
+            <audio id="reader-audio-player" controls preload="none" controlslist="nodownload" class="audio-element"></audio>
+            <div id="reader-audio-status" class="muted-xs"></div>
+          </div>
+
+          <!-- Chapters Navigation -->
+          <div class="sidebar-block chapters-block">
+            <h3 class="sidebar-heading" data-i18n="chaptersHeading">Module Chapters</h3>
+            <ul id="reader-chapters-list" class="chapters-list"></ul>
+          </div>
+
+          <!-- Server Security Telemetry -->
+          <div class="sidebar-block telemetry-box">
+            <h3 class="sidebar-heading" data-i18n="securityProofHeading">Server Enforcement Proof</h3>
+            <dl class="telemetry-list">
+              <div>
+                <dt data-i18n="telemetryDelivery">Delivery Format</dt>
+                <dd>Server PNG Raster (144 DPI)</dd>
+              </div>
+              <div>
+                <dt data-i18n="telemetryWatermark">Watermark Mode</dt>
+                <dd id="telemetry-watermark-mode">Pixel-composited (No DOM overlay)</dd>
+              </div>
+              <div>
+                <dt data-i18n="telemetryCache">Cache Policy</dt>
+                <dd id="telemetry-cache" class="mono-xs">no-store, private</dd>
+              </div>
+              <div>
+                <dt data-i18n="telemetryToken">Page Token Exp.</dt>
+                <dd id="telemetry-token-exp" class="mono-xs">—</dd>
+              </div>
+            </dl>
+          </div>
+        </aside>
+
+        <!-- Reader Stage -->
+        <div id="reader-stage-container" class="reader-main">
+          <!-- Reader Controls Toolbar -->
+          <div class="reader-toolbar" role="toolbar" aria-label="Document reader controls">
+            <div class="toolbar-group">
+              <button type="button" id="btn-prev-page" class="btn btn-toolbar" aria-label="Previous page" data-i18n="prevPage">
+                ◀ Prev
+              </button>
+              <div class="page-jump-group">
+                <label for="input-page-num" class="sr-only">Page number</label>
+                <input id="input-page-num" type="number" min="1" value="1" class="page-num-input" />
+                <span class="page-total-label">/ <span id="label-page-count">1</span></span>
+              </div>
+              <button type="button" id="btn-next-page" class="btn btn-toolbar" aria-label="Next page" data-i18n="nextPage">
+                Next ▶
+              </button>
+            </div>
+
+            <div class="toolbar-group">
+              <button type="button" id="btn-zoom-out" class="btn btn-toolbar" aria-label="Zoom out">−</button>
+              <button type="button" id="btn-zoom-reset" class="btn btn-toolbar mono-xs" aria-label="Reset zoom">100%</button>
+              <button type="button" id="btn-zoom-in" class="btn btn-toolbar" aria-label="Zoom in">+</button>
+              <button type="button" id="btn-fullscreen" class="btn btn-toolbar" data-i18n="fullscreenBtn">Fullscreen</button>
+            </div>
+          </div>
+
+          <!-- Viewport Canvas (NO CSS watermark overlay — pure server PNG!) -->
+          <div id="reader-viewport" class="reader-viewport">
+            <div id="reader-loading" class="reader-state hidden" role="status">
+              <div class="spinner" aria-hidden="true"></div>
+              <span data-i18n="renderingPage">Verifying entitlement &amp; rasterising watermarked page…</span>
+            </div>
+
+            <div id="reader-denied" class="reader-denied-box hidden" role="alert">
+              <div class="denied-badge" data-i18n="accessDeniedBadge">ACCESS DENIED BY SERVER</div>
+              <h3 id="reader-denied-title" class="serif-heading"></h3>
+              <p id="reader-denied-desc"></p>
+            </div>
+
+            <figure id="reader-figure" class="reader-figure">
+              <img id="reader-page-img" class="reader-page-img" alt="Protected watermarked document page" draggable="false" />
+            </figure>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================ -->
+    <!-- VIEW 2B: REVIEWER PORTAL (LEAST-PRIVILEGE M007 LANDING)      -->
+    <!-- ============================================================ -->
+    <section id="view-reviewer" class="hidden" aria-label="Authorized reviewer workspace">
+      <div class="container section-pad">
+        <div class="card" style="max-width: 820px; margin: 0 auto;">
+          <div class="eyebrow" data-i18n="reviewerEyebrow">AUTHORIZED REVIEWER PORTAL · LEAST-PRIVILEGE SESSION</div>
+          <h1 class="serif-heading" data-i18n="reviewerHeading" style="margin-top: 8px;">
+            M007 Private Specialist Collaboration Review
+          </h1>
+          <p class="muted" data-i18n="reviewerLead" style="margin: 12px 0 20px;">
+            Your reviewer session is scoped strictly to the private, non-indexed M007 Specialist Collaboration &amp; Public Education Portfolio prototype. In accordance with STRATA least-privilege governance, reviewer accounts hold zero access to learner curriculum files, raw PDFs, or administrator controls.
+          </p>
+          <div class="security-pillars" style="margin-bottom: 24px;">
+            <div class="pillar-card">
+              <div class="pillar-title" data-i18n="reviewerScope1Title">Authorized M007 Access</div>
+              <p data-i18n="reviewerScope1Body">Inspect primary-source verification badges (VERIFIED vs PARTIALLY VERIFIED), bilingual EN/中文 copy, and local-only enquiry capture.</p>
+            </div>
+            <div class="pillar-card">
+              <div class="pillar-title" data-i18n="reviewerScope2Title">Non-Indexed &amp; Private</div>
+              <p data-i18n="reviewerScope2Body">Protected by server-side session checks, X-Robots-Tag noindex headers, and strict no-store cache directives.</p>
+            </div>
+            <div class="pillar-card">
+              <div class="pillar-title" data-i18n="reviewerScope3Title">Zero Learner Data Exposure</div>
+              <p data-i18n="reviewerScope3Body">Student entitlements, watermarked learning modules, and administrative audit APIs remain isolated.</p>
+            </div>
+          </div>
+          <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+            <a id="btn-reviewer-open-portfolio" href="/portfolio" class="btn btn-primary" data-i18n="reviewerOpenPortfolioBtn">
+              Open Private M007 Portfolio →
+            </a>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================ -->
+    <!-- VIEW 3: ADMIN CONSOLE                                        -->
+    <!-- ============================================================ -->
+    <section id="view-admin" class="hidden" aria-label="Administrator governance console">
+      <div class="subbar">
+        <div class="container subbar-inner">
+          <div class="subbar-tabs" role="tablist">
+            <button type="button" class="subtab active" data-admin-tab="overview" role="tab" aria-selected="true" data-i18n="adminTabEntitlements">
+              Documents &amp; Entitlements
+            </button>
+            <button type="button" class="subtab" data-admin-tab="upload" role="tab" aria-selected="false" data-i18n="adminTabUpload">
+              Upload Private PDF
+            </button>
+            <button type="button" class="subtab" data-admin-tab="users" role="tab" aria-selected="false" data-i18n="adminTabUsers">
+              Learner Accounts
+            </button>
+            <button type="button" class="subtab" data-admin-tab="audit" role="tab" aria-selected="false" data-i18n="adminTabAudit">
+              Security Audit &amp; Proof
+            </button>
+          </div>
+          <div class="subbar-meta">
+            <button type="button" id="btn-admin-refresh" class="btn btn-secondary btn-sm" data-i18n="refreshBtn">Refresh</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="container section-pad">
+        <!-- Metrics Strip -->
+        <div class="stats-strip" id="admin-stats-strip">
+          <div class="stat-card">
+            <div class="stat-label" data-i18n="statDocuments">Private Documents</div>
+            <div class="stat-value" id="stat-docs">0</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label" data-i18n="statAccounts">Registered Accounts</div>
+            <div class="stat-value" id="stat-users">0</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label" data-i18n="statGrants">Active Entitlements</div>
+            <div class="stat-value emerald-text" id="stat-grants">0</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label" data-i18n="statAllows">Authorized Events</div>
+            <div class="stat-value" id="stat-allows">0</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label" data-i18n="statDenies">Blocked Attempts</div>
+            <div class="stat-value danger-text" id="stat-denies">0</div>
+          </div>
+        </div>
+
+        <!-- Admin Panel A: Documents & Entitlements -->
+        <div id="admin-panel-overview" class="admin-panel">
+          <div class="admin-split">
+            <div class="card">
+              <h2 class="card-title serif-heading" data-i18n="vaultInventoryHeading">Private Vault Inventory</h2>
+              <p class="muted-sm" data-i18n="vaultInventorySub">Select a document to manage per-learner entitlements, expirations, and revocations.</p>
+              <div id="admin-docs-list" class="admin-doc-list"></div>
+            </div>
+
+            <div class="card" id="admin-entitlement-card">
+              <div class="entitlement-header">
+                <div>
+                  <h2 id="admin-selected-doc-title" class="card-title serif-heading" data-i18n="manageEntitlementsHeading">Entitlement Control</h2>
+                  <p id="admin-selected-doc-meta" class="muted-sm mono-xs"></p>
+                </div>
+              </div>
+
+              <form id="grant-form" class="grant-form">
+                <div class="form-row-2">
+                  <div class="field">
+                    <label for="grant-student-email" data-i18n="selectLearnerLabel">Learner Account</label>
+                    <select id="grant-student-email" required></select>
+                  </div>
+                  <div class="field">
+                    <label for="grant-expires" data-i18n="expirationOptionalLabel">Access Expiration (Optional)</label>
+                    <input id="grant-expires" type="datetime-local" />
+                  </div>
+                </div>
+                <div class="grant-actions">
+                  <button type="submit" class="btn btn-primary btn-sm" data-i18n="grantAccessBtn">Grant / Update Access</button>
+                  <button type="button" id="btn-grant-short-expiry" class="btn btn-secondary btn-sm" data-i18n="grantShortExpiryBtn">
+                    Grant 60s Expiring Access
+                  </button>
+                </div>
+              </form>
+
+              <div class="divider"></div>
+              <h3 class="card-title-sm" data-i18n="currentEntitlementsHeading">Current Learner Entitlements</h3>
+              <div id="admin-entitlements-table-wrap" class="table-wrap"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Admin Panel B: Upload Private PDF -->
+        <div id="admin-panel-upload" class="admin-panel hidden">
+          <div class="card form-card-narrow">
+            <h2 class="card-title serif-heading" data-i18n="uploadHeading">Ingest Private PDF into ContentVault</h2>
+            <p class="muted-sm" data-i18n="uploadSub">
+              Uploaded PDFs are validated via the modular PDFium engine, written under an opaque key with 0600 permissions outside the web root, and never served directly. Use synthetic or authorized material only.
+            </p>
+
+            <form id="upload-form" class="form-stack">
+              <div class="field">
+                <label for="upload-title-en" data-i18n="titleEnLabel">Title (English) *</label>
+                <input id="upload-title-en" type="text" required placeholder="e.g. Synthetic Clinical Neurophysiology Notes" />
+              </div>
+              <div class="field">
+                <label for="upload-title-zh" data-i18n="titleZhLabel">Title (Mandarin / 中文)</label>
+                <input id="upload-title-zh" type="text" placeholder="例如：临床神经电生理合成讲义" />
+              </div>
+              <div class="field">
+                <label for="upload-author" data-i18n="authorLabel">Author / Source Label</label>
+                <input id="upload-author" type="text" value="STRATA Research Lab (Synthetic)" />
+              </div>
+              <div class="field">
+                <label for="upload-desc" data-i18n="descLabel">Module Summary</label>
+                <textarea id="upload-desc" rows="3" placeholder="Synthetic demonstration document description..."></textarea>
+              </div>
+              <div class="field">
+                <label for="upload-file" data-i18n="pdfFileLabel">PDF File (application/pdf, max 40 MB) *</label>
+                <input id="upload-file" type="file" accept="application/pdf,.pdf" required />
+              </div>
+              <button type="submit" id="btn-upload-submit" class="btn btn-primary" data-i18n="uploadSubmitBtn">
+                Validate &amp; Store Privately
+              </button>
+            </form>
+          </div>
+        </div>
+
+        <!-- Admin Panel C: Learner Accounts -->
+        <div id="admin-panel-users" class="admin-panel hidden">
+          <div class="admin-split">
+            <div class="card">
+              <h2 class="card-title serif-heading" data-i18n="registerLearnerHeading">Provision Account</h2>
+              <p class="muted-sm" data-i18n="registerLearnerSub">Self-registration is disabled; only administrators may provision learner or admin credentials.</p>
+              <form id="register-user-form" class="form-stack">
+                <div class="field">
+                  <label for="reg-name" data-i18n="displayNameLabel">Full Name (Used in Watermark)</label>
+                  <input id="reg-name" type="text" required placeholder="e.g. Lim Mei Ling (Synthetic Student)" />
+                </div>
+                <div class="field">
+                  <label for="reg-email" data-i18n="emailLabel">Email Address</label>
+                  <input id="reg-email" type="email" required placeholder="meiling@student.strata.local" />
+                </div>
+                <div class="field">
+                  <label for="reg-password" data-i18n="passwordMinLabel">Initial Password (min 8 chars)</label>
+                  <input id="reg-password" type="password" minlength="8" required placeholder="At least 8 characters" />
+                </div>
+                <div class="form-row-2">
+                  <div class="field">
+                    <label for="reg-role" data-i18n="roleLabel">Role</label>
+                    <select id="reg-role">
+                      <option value="student">Student</option>
+                      <option value="reviewer">Reviewer (Portfolio Access)</option>
+                      <option value="admin">Administrator</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="reg-locale" data-i18n="preferredLocaleLabel">Locale</label>
+                    <select id="reg-locale">
+                      <option value="en">English (EN)</option>
+                      <option value="zh">Mandarin (中文)</option>
+                    </select>
+                  </div>
+                </div>
+                <button type="submit" class="btn btn-primary" data-i18n="createAccountBtn">Create Account</button>
+              </form>
+            </div>
+
+            <div class="card">
+              <h2 class="card-title serif-heading" data-i18n="directoryHeading">Account Directory</h2>
+              <div id="admin-users-table-wrap" class="table-wrap"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Admin Panel D: Security Audit & Watermark Engine Self-Test -->
+        <div id="admin-panel-audit" class="admin-panel hidden">
+          <div class="card selftest-card">
+            <div class="section-header-row">
+              <div>
+                <h2 class="card-title serif-heading" data-i18n="selftestHeading">Cryptographic Watermark Engine Proof (CV-005 / CV-006 / CV-019)</h2>
+                <p class="muted-sm" data-i18n="selftestSub">
+                  Renders the same page for Student A, Student B, and an unwatermarked baseline on the server and compares SHA-256 pixel digests.
+                </p>
+              </div>
+              <button type="button" id="btn-run-selftest" class="btn btn-primary btn-sm" data-i18n="runSelftestBtn">
+                Run Live Pixel Proof
+              </button>
+            </div>
+            <div id="selftest-output" class="selftest-result hidden"></div>
+          </div>
+
+          <div class="card">
+            <div class="section-header-row">
+              <div>
+                <h2 class="card-title serif-heading" data-i18n="auditLogHeading">Append-Only Security Audit Trail (CV-014)</h2>
+                <p class="muted-sm" data-i18n="auditLogSub">Every authentication, upload, grant, revocation, page render, audio play, and access denial is immutably logged.</p>
+              </div>
+              <div class="audit-filters">
+                <label for="audit-filter-outcome" class="sr-only">Filter outcome</label>
+                <select id="audit-filter-outcome">
+                  <option value="">All Outcomes</option>
+                  <option value="allow">Allow Only</option>
+                  <option value="deny">Deny Only</option>
+                  <option value="info">Info</option>
+                </select>
+                <label for="audit-filter-event" class="sr-only">Filter event</label>
+                <select id="audit-filter-event">
+                  <option value="">All Events</option>
+                  <option value="auth.login">auth.login</option>
+                  <option value="document.upload">document.upload</option>
+                  <option value="document.open">document.open</option>
+                  <option value="entitlement.grant">entitlement.grant</option>
+                  <option value="entitlement.revoke">entitlement.revoke</option>
+                  <option value="page.render">page.render</option>
+                  <option value="audio.play">audio.play</option>
+                </select>
+              </div>
+            </div>
+            <div id="admin-audit-table-wrap" class="table-wrap"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <div>
+        <strong>STRATA Medical AI Research Lab</strong> · ContentVault v0.1 Proof of Concept
+      </div>
+      <div class="footer-note" data-i18n="footerDisclaimer">
+        Piracy deterrence, traceability &amp; access control — independent research prototype; not affiliated with Mindvalley.
+      </div>
+    </div>
+  </footer>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>

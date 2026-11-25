@@ -1,0 +1,5 @@
+# STRATA ContentVault — Pinned Python Dependencies (Mission 004 Phase A)
+# Default PDF rasteriser (`pypdfium2`) + burned-in pixel watermarking (`Pillow`).
+# Zero AGPL runtime dependencies; see docs/licensing/PDF_ENGINE_LICENSES_AND_OBLIGATIONS.md.
+pypdfium2==5.15.2
+Pillow==13.0.0

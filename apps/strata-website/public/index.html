@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="robots" content="noindex, nofollow, noarchive" />
+  <title>Dr. Eow Gaik Bee · Professional Digital Portfolio Prototype (M007 · Private)</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="stylesheet" href="/portfolio/portfolio.css" />
+</head>
+<body>
+  <!-- Mandatory Private Governance Notice -->
+  <div class="gov-banner" role="region" aria-label="Private prototype governance notice">
+    <div class="container gov-banner-inner">
+      <span class="gov-pill" data-i18n="govPill">PRIVATE PROTOTYPE · AUTHORIZED REVIEWERS ONLY</span>
+      <span data-i18n="govNotice">
+        M007 Draft for Internal Review Only — Authenticated reviewer/admin access enforced (SEC-001). Proposed STRATA partnership is UNCONFIRMED; unverified credentials, ISBNs, and media assets are marked as placeholders.
+      </span>
+    </div>
+  </div>
+
+  <!-- Navigation Header -->
+  <header class="pf-header">
+    <div class="container pf-header-inner">
+      <div class="pf-brand">
+        <span class="pf-monogram" aria-hidden="true">EGB</span>
+        <div>
+          <div class="pf-brand-name">Dr. Eow Gaik Bee</div>
+          <div class="pf-brand-sub" data-i18n="headerSub">Consultant Neurologist · Educator · Clinical Researcher</div>
+        </div>
+      </div>
+
+      <nav class="pf-nav" aria-label="Portfolio sections">
+        <a href="#credentials" data-i18n="navCredentials">Qualifications</a>
+        <a href="#timeline" data-i18n="navTimeline">Timeline</a>
+        <a href="#publications" data-i18n="navPublications">Publications</a>
+        <a href="#programmes" data-i18n="navProgrammes">Programmes</a>
+        <a href="#speaking" data-i18n="navSpeaking">Speaking &amp; Media</a>
+        <a href="#enquiry" data-i18n="navEnquiry">Collaboration</a>
+      </nav>
+
+      <div class="pf-controls">
+        <button type="button" id="btn-toggle-placeholders" class="btn-filter" aria-pressed="false" data-i18n="highlightPlaceholders">
+          Highlight Placeholders
+        </button>
+        <div class="locale-group" role="group" aria-label="Language switch">
+          <button type="button" id="pf-en" class="loc-btn active">EN</button>
+          <button type="button" id="pf-zh" class="loc-btn">中文</button>
+        </div>
+        <a href="/" class="btn-vault" data-i18n="backToVault">ContentVault →</a>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- Hero & Biography -->
+    <section class="pf-hero">
+      <div class="container pf-hero-grid">
+        <div>
+          <div class="status-legend">
+            <span class="v-badge v-verified" data-i18n="legendVerified">VERIFIED (Primary Register / DOI)</span>
+            <span class="v-badge v-partial" data-i18n="legendPartial">PARTIALLY VERIFIED</span>
+            <span class="v-badge v-placeholder" data-i18n="legendPlaceholder">PLACEHOLDER (Unverified)</span>
+          </div>
+
+          <h1 class="pf-title" data-i18n="heroName">Dr. Eow Gaik Bee, MD, MRCP (UK)</h1>
+          <p class="pf-role-line">
+            <span data-i18n="heroRole">Consultant Neurologist &amp; Internal Medicine Specialist · Division of Neurology, Hospital Pulau Pinang</span>
+            <span class="v-badge v-verified" data-i18n="nsrBadge">VERIFIED · NSR #126713</span>
+          </p>
+
+          <p class="pf-bio" data-i18n="heroBio">
+            Registered Consultant Neurologist in George Town, Penang, Malaysia (National Specialist Register #126713), medical educator, and co-author of national epilepsy guidelines and peer-reviewed neurological research across stroke recovery, neuromyelitis optica spectrum disorder, and movement disorders.
+          </p>
+
+          <div class="placeholder-callout" data-placeholder-item="true">
+            <strong data-i18n="proposedRolePrefix">[PLACEHOLDER — PROPOSED STRATA ROLE]:</strong>
+            <span data-i18n="proposedRoleNotice">
+              Proposed Founding Research Partner &amp; Medical Advisor for STRATA Project 001. This collaboration is PROPOSED ONLY and awaits formal review and written consent from Dr. Eow Gaik Bee.
+            </span>
+          </div>
+        </div>
+
+        <!-- Portrait Placeholder Card (AGENTS.md s.6.3 / s.24) -->
+        <aside class="portrait-card" data-placeholder-item="true" aria-label="Portrait placeholder">
+          <div class="portrait-frame">
+            <svg viewBox="0 0 160 180" class="portrait-svg" role="img" aria-label="Portrait placeholder silhouette">
+              <rect width="160" height="180" fill="#142B40" />
+              <circle cx="80" cy="64" r="28" fill="none" stroke="#C5A46D" stroke-width="2.5" />
+              <path d="M32 162c6-28 26-44 48-44s42 16 48 44" fill="none" stroke="#C5A46D" stroke-width="2.5" />
+            </svg>
+            <span class="v-badge v-placeholder portrait-tag" data-i18n="portraitBadge">PORTRAIT PLACEHOLDER</span>
+          </div>
+          <p class="portrait-caption" data-i18n="portraitNotice">
+            [PLACEHOLDER: Official portrait withheld in accordance with STRATA governance (AGENTS.md §6.3, §24) until written publication approval is granted.]
+          </p>
+        </aside>
+      </div>
+    </section>
+
+    <!-- Qualifications & Credentials -->
+    <section id="credentials" class="pf-section">
+      <div class="container">
+        <h2 class="sec-heading" data-i18n="credentialsHeading">Academic &amp; Professional Qualifications</h2>
+        <p class="sec-sub" data-i18n="credentialsSub">
+          Cross-referenced on 2026-11-24 against the National Specialist Register of Malaysia (NSR), Malaysian Medical Council (MMC MeRITS), and peer-reviewed publications.
+        </p>
+        <div id="credentials-grid" class="cards-grid-3"></div>
+      </div>
+    </section>
+
+    <!-- Career Timeline -->
+    <section id="timeline" class="pf-section pf-section-alt">
+      <div class="container">
+        <h2 class="sec-heading" data-i18n="timelineHeading">Academic &amp; Clinical Career Timeline</h2>
+        <div id="timeline-list" class="timeline-list"></div>
+      </div>
+    </section>
+
+    <!-- Publications Catalogue -->
+    <section id="publications" class="pf-section">
+      <div class="container">
+        <div class="sec-header-flex">
+          <div>
+            <h2 class="sec-heading" data-i18n="pubsHeading">Publications &amp; Authored Monographs</h2>
+            <p class="sec-sub" data-i18n="pubsSub">
+              Separating verified peer-reviewed clinical research (DOI) from partially verified records and owner-supplied catalogue placeholders.
+            </p>
+          </div>
+          <div class="pub-tabs" role="tablist">
+            <button type="button" id="tab-pub-books" class="pub-tab active" data-i18n="tabBooks">Authored Books (10)</button>
+            <button type="button" id="tab-pub-journals" class="pub-tab" data-i18n="tabJournals">Peer-Reviewed Research (5)</button>
+          </div>
+        </div>
+
+        <div id="pub-books-grid" class="cards-grid-2"></div>
+        <div id="pub-journals-list" class="journals-list hidden"></div>
+      </div>
+    </section>
+
+    <!-- Research Interests & Educational Programmes -->
+    <section id="programmes" class="pf-section pf-section-alt">
+      <div class="container two-col">
+        <div>
+          <h2 class="sec-heading" data-i18n="researchInterestsHeading">Research &amp; Educational Interests</h2>
+          <ul id="interests-list" class="interest-list"></ul>
+        </div>
+
+        <div>
+          <h2 class="sec-heading" data-i18n="programmesHeading">Educational Programme Catalogue</h2>
+          <p class="sec-sub" data-i18n="programmesSub">
+            Preliminary programme inventory supplied for Digital Academy scoping — marked as placeholders pending partner validation.
+          </p>
+          <div id="programmes-list" class="programmes-stack"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- International Speaker Profile & Media Resources -->
+    <section id="speaking" class="pf-section">
+      <div class="container two-col">
+        <div>
+          <h2 class="sec-heading" data-i18n="speakingHeading">Proposed International Speaking Topics</h2>
+          <p class="sec-sub" data-i18n="speakingSub">Draft keynote and masterclass themes subject to speaker approval.</p>
+          <div id="speaking-topics-list"></div>
+        </div>
+
+        <div>
+          <h2 class="sec-heading" data-i18n="mediaKitHeading">Speaker Media Resources</h2>
+          <div class="media-kit-box" data-placeholder-item="true">
+            <span class="v-badge v-placeholder" data-i18n="mediaKitBadge">PLACEHOLDER ASSETS — NOT FOR DISTRIBUTION</span>
+            <ul id="media-resources-list" class="media-list"></ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Local-Only Collaboration Enquiry -->
+    <section id="enquiry" class="pf-section pf-section-alt">
+      <div class="container enquiry-wrap">
+        <div class="enquiry-card">
+          <h2 class="sec-heading" data-i18n="enquiryHeading">Collaboration &amp; Speaking Enquiry (Local Staging Mode)</h2>
+          <p class="sec-sub" data-i18n="enquirySub">
+            Per STRATA governance (AGENTS.md §18, §24), external communications are disabled in this prototype. Submissions require an authenticated reviewer/admin session and are recorded locally in SQLite only.
+          </p>
+
+          <form id="enquiry-form" class="enq-form">
+            <div class="enq-row">
+              <div class="enq-field">
+                <label for="enq-name" data-i18n="enqName">Your Name *</label>
+                <input id="enq-name" type="text" required placeholder="Dr. / Prof. / Coordinator Name" data-i18n-placeholder="enqNamePh" />
+              </div>
+              <div class="enq-field">
+                <label for="enq-org" data-i18n="enqOrg">Institution / Organization</label>
+                <input id="enq-org" type="text" placeholder="University / Medical Society / Conference" data-i18n-placeholder="enqOrgPh" />
+              </div>
+            </div>
+
+            <div class="enq-row">
+              <div class="enq-field">
+                <label for="enq-email" data-i18n="enqEmail">Official Email *</label>
+                <input id="enq-email" type="email" required placeholder="name@institution.org" data-i18n-placeholder="enqEmailPh" />
+              </div>
+              <div class="enq-field">
+                <label for="enq-topic" data-i18n="enqTopic">Enquiry Category</label>
+                <select id="enq-topic">
+                  <option value="academic_speaking" data-i18n="optSpeaking">Academic Keynote / Medical Lecture</option>
+                  <option value="research_collaboration" data-i18n="optResearch">Clinical / Educational AI Research</option>
+                  <option value="editorial_book" data-i18n="optBook">Publication &amp; Bilingual Licensing</option>
+                  <option value="international_workshop" data-i18n="optWorkshop">International Educational Workshop</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="enq-field">
+              <label for="enq-message" data-i18n="enqMessage">Proposed Collaboration Details (min 10 chars) *</label>
+              <textarea id="enq-message" rows="3" required placeholder="Describe the academic, speaking, or educational collaboration opportunity..." data-i18n-placeholder="enqMessagePh"></textarea>
+            </div>
+
+            <button type="submit" class="btn-submit" data-i18n="enqSubmit">Record Local Prototype Enquiry</button>
+            <div id="enq-status" class="enq-status hidden" role="status"></div>
+          </form>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="pf-footer">
+    <div class="container pf-footer-inner">
+      <div data-i18n="footerLeft">
+        STRATA Medical AI Research Lab · M007 Professional Digital Portfolio Prototype (Private)
+      </div>
+      <div data-i18n="footerRight">
+        Independent research prototype · Not affiliated with Mindvalley, Hospital Pulau Pinang, or USM · Do not publish without Dr. Eow's written consent.
+      </div>
+    </div>
+  </footer>
+
+  <script src="/portfolio/portfolio.js" defer></script>
+</body>
+</html>

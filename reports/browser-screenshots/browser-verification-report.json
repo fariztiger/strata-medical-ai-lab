@@ -1,0 +1,33 @@
+{
+  "executedAt": "2026-11-24T23:33:34.315Z",
+  "browserVersion": "157.0.8103.78",
+  "pdfEngine": "pypdfium2",
+  "viewportsTested": [
+    "1440x900",
+    "390x844"
+  ],
+  "checks": {
+    "anonymousPortfolioBlocked401": true,
+    "persona1AdminDesktop": true,
+    "persona2StudentADesktopAndAudio": {
+      "page2NaturalSize": "1190x1684",
+      "audioDurationSec": 8
+    },
+    "persona3StudentBMandarinAndLiveRevocation": true,
+    "persona4StudentCDeniedAndPortfolio403": true,
+    "reviewerPortfolioDesktop": true,
+    "mobileResponsive390x844": true
+  },
+  "screenshots": [
+    "01-desktop-admin-console.png",
+    "02-desktop-student-a-reader-en.png",
+    "03-desktop-student-b-reader-zh.png",
+    "04-desktop-student-b-revoked.png",
+    "05-desktop-student-c-denied.png",
+    "06a-desktop-reviewer-portal.png",
+    "06-desktop-portfolio-zh.png",
+    "07a-mobile-student-a-canvas.png",
+    "07-mobile-student-a-reader.png",
+    "08-mobile-portfolio-en.png"
+  ]
+}
